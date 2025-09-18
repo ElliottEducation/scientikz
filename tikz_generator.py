@@ -1,10 +1,10 @@
 # tikz_generator.py
-# Core generation logic for scientikz MVP (math, physics, statistics, chemistry)
+# Core generation logic for scientikz MVP with category + subcategory hints
 # English-only comments and consistent formatting
 
 import re
 from dataclasses import dataclass
-from typing import Literal, Tuple
+from typing import Literal, Tuple, Optional
 
 Category = Literal["Math", "Physics", "Statistics", "Chemistry"]
 
@@ -21,7 +21,7 @@ def detect_category(prompt: str) -> Category:
     p = prompt.lower()
     if any(k in p for k in ["molecule", "chemfig", "compound", "chemistry"]):
         return "Chemistry"
-    if any(k in p for k in ["circuit", "inclined plane", "forces", "free body", "battery", "resistor"]):
+    if any(k in p for k in ["circuit", "inclined plane", "forces", "battery", "resistor", "electric"]):
         return "Physics"
     if any(k in p for k in ["scatter", "histogram", "normal", "regression", "statistics"]):
         return "Statistics"
@@ -33,7 +33,7 @@ def detect_category(prompt: str) -> Category:
 def wrap_as_document(body: str, needs_pgfplots: bool, needs_circuitikz: bool, needs_chemfig: bool) -> str:
     pkgs = [
         r"\usepackage{tikz}",
-        r"\usepackage{siunitx}"
+        r"\usepackage{siunitx}",
     ]
     if needs_pgfplots:
         pkgs.append(r"\usepackage{pgfplots}")
@@ -77,7 +77,6 @@ def gen_math_plot(prompt: str) -> Tuple[str, bool]:
             except:
                 pass
 
-    # Vector case
     v = re.search(r"(draw\s+)?vector\s+\w*\s*=\s*\(\s*([-\d\.]+)\s*,\s*([-\d\.]+)\s*\)", prompt, re.IGNORECASE)
     if v and not expr:
         vx = v.group(2)
@@ -96,12 +95,10 @@ def gen_math_plot(prompt: str) -> Tuple[str, bool]:
     if not expr:
         expr = "sin(deg(x))"
 
-    # Normalize common forms
     expr_norm = (
         expr.replace("sin(x)", "sin(deg(x))")
             .replace("cos(x)", "cos(deg(x))")
-            .replace("^", "**")  # pgfplots accepts ^, but this makes it explicit if needed
-            .replace("**", "^")  # keep caret for LaTeX
+            .replace("**", "^")  # keep caret
     )
 
     body = rf"""
@@ -139,7 +136,6 @@ def gen_inclined_plane(prompt: str) -> str:
   \draw[rotate=\ang] (0,0) -- (6,0);
   \draw[rotate=\ang] (0,0) -- (0,2.5);
   \filldraw[rotate=\ang, fill=gray!20] (2.5,0.2) rectangle (3.7,1.1);
-  \draw (0,0) -- (0,0) coordinate(O);
   \draw[->, thick] (3.1,1.1) -- ++(0,-2) node[below] {{$mg$}};
   \draw[->, thick, rotate=\ang] (3.1,1.1) -- ++(0,1.6) node[above] {{$N$}};
   {"\\draw[->, thick, rotate=\\ang] (3.7,0.65) -- ++(0.9,0) node[right] {$f$};" if show_friction else ""}
@@ -175,16 +171,19 @@ def gen_dc_circuit(prompt: str) -> str:
 """
     return body
 
-def gen_physics(prompt: str) -> Tuple[str, bool, bool]:
+def gen_physics(prompt: str, subcategory: Optional[str]) -> Tuple[str, bool, bool]:
     p = prompt.lower()
     needs_pgfplots = False
     needs_circuitikz = False
-    if "inclined plane" in p or "slope" in p:
+
+    sub = (subcategory or "").lower()
+    if "inclined plane" in p or "slope" in p or "classical" in sub:
         body = gen_inclined_plane(prompt)
-    elif "circuit" in p or "battery" in p or "resistor" in p:
+    elif "circuit" in p or "battery" in p or "resistor" in p or "electromagnetism" in sub:
         body = gen_dc_circuit(prompt)
         needs_circuitikz = True
     else:
+        # simple generic vector diagram (also used for quantum placeholder)
         body = r"""
 \begin{tikzpicture}[scale=1.1]
   \draw[->] (-0.5,0) -- (4.5,0) node[right] {$x$};
@@ -208,15 +207,17 @@ def parse_list_numbers(s: str):
             pass
     return out
 
-def gen_statistics(prompt: str) -> Tuple[str, bool]:
+def gen_statistics(prompt: str, subcategory: Optional[str]) -> Tuple[str, bool]:
     p = prompt.lower()
-    if "scatter" in p:
+
+    if "scatter" in p or (subcategory or "").lower() in ["descriptive", "regression"]:
         mx = re.search(r"x\s*=\s*(\[[^\]]+\])", prompt, re.IGNORECASE)
         my = re.search(r"y\s*=\s*(\[[^\]]+\])", prompt, re.IGNORECASE)
-        xs = parse_list_numbers(mx.group(1)) if mx else [1,2,3]
-        ys = parse_list_numbers(my.group(1)) if my else [2,3,5]
-        pairs = "\n".join([f"{a}\t{b}" for a,b in zip(xs,ys)])
+        xs = parse_list_numbers(mx.group(1)) if mx else [1, 2, 3]
+        ys = parse_list_numbers(my.group(1)) if my else [2, 3, 5]
+        pairs = "\n".join([f"{a}\t{b}" for a, b in zip(xs, ys)])
 
+        # basic scatter; regression line could be added later as Pro feature
         body = rf"""
 \begin{{tikzpicture}}
 \begin{{axis}}[
@@ -237,7 +238,7 @@ table[row sep=crcr] {{
 """
         return body, True
 
-    # normal curve
+    # normal curve for inference
     m_mu = re.search(r"mu\s*=\s*([-\d\.]+)", prompt, re.IGNORECASE)
     m_si = re.search(r"sigma\s*=\s*([-\d\.]+)", prompt, re.IGNORECASE)
     m_rng = re.search(r"from\s+([-\d\.]+)\s+to\s+([-\d\.]+)", prompt, re.IGNORECASE)
@@ -283,19 +284,23 @@ def gen_chemistry(prompt: str) -> Tuple[str, bool]:
 # ---------------------------
 # Dispatcher
 # ---------------------------
-def generate_document(prompt: str, category_hint: str) -> GenerationResult:
-    category = detect_category(prompt) if category_hint == "Auto" else category_hint
+def generate_document(prompt: str, category_hint: str, subcategory_hint: Optional[str] = None) -> GenerationResult:
+    """
+    category_hint: "Math" | "Physics" | "Statistics" | "Chemistry" | "Auto"
+    subcategory_hint: optional string; used as soft guidance for templates
+    """
+    cat = detect_category(prompt) if category_hint == "Auto" else category_hint
     needs_pgfplots = False
     needs_circuitikz = False
     needs_chemfig = False
 
-    if category == "Math":
+    if cat == "Math":
         body, needs_pgfplots = gen_math_plot(prompt)
-    elif category == "Physics":
-        body, needs_pgfplots, needs_circuitikz = gen_physics(prompt)
-    elif category == "Statistics":
-        body, needs_pgfplots = gen_statistics(prompt)
-    elif category == "Chemistry":
+    elif cat == "Physics":
+        body, needs_pgfplots, needs_circuitikz = gen_physics(prompt, subcategory_hint)
+    elif cat == "Statistics":
+        body, needs_pgfplots = gen_statistics(prompt, subcategory_hint)
+    elif cat == "Chemistry":
         body, _ = gen_chemistry(prompt)
         needs_chemfig = True
     else:
@@ -303,4 +308,4 @@ def generate_document(prompt: str, category_hint: str) -> GenerationResult:
 
     doc = wrap_as_document(body, needs_pgfplots, needs_circuitikz, needs_chemfig)
     summary = "Generated LaTeX document with TikZ content."
-    return GenerationResult(latex=doc, category=category, summary=summary)
+    return GenerationResult(latex=doc, category=cat, summary=summary)
