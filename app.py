@@ -1,5 +1,5 @@
 # app.py
-# scientikz · Streamlit UI (no subject prefixes required)
+# scientikz · Streamlit UI (Tabs decide subject) + English NL parsing (optional)
 import os
 import io
 import json
@@ -11,7 +11,9 @@ from streamlit.components.v1 import html
 from tikz_generator import (
     generate_document,
     GenerationResult,
-    _fmt,  # for building directive strings in forms
+    _fmt,
+    nl_parse_and_render,   # NEW: NL parsing entry
+    ValidationError,       # NEW: typed error
 )
 
 APP_NAME = os.getenv("SCIENTIKZ_APP_NAME", "scientikz")
@@ -25,6 +27,7 @@ div[data-baseweb="tab-list"] { gap: 6px; }
 div[data-baseweb="tab"] { border-radius: 10px; }
 .pill { padding: 6px 10px; border: 1px solid #d0d7de; border-radius: 999px; }
 .subtle { color:#6a737d; }
+pre code { white-space: pre-wrap; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -33,7 +36,7 @@ def header_bar():
     left, right = st.columns([3, 2])
     with left:
         st.title(APP_NAME)
-        st.caption("Natural language → TikZ/PGFPlots/Circuitikz/Chemfig")
+        st.caption("Natural language → TikZ/PGFPlots/Circuitikz/Chemfig · with English NL parsing (beta)")
     with right:
         st.markdown('<span class="pill">Offline mode</span> <span class="subtle">(no auth in this MVP)</span>', unsafe_allow_html=True)
 
@@ -249,8 +252,32 @@ def render_chem_form(subcat: str) -> Optional[str]:
         return f"mode=benzene, subs={subs_part}"
     return None
 
+# --------- NL mode helper ----------
+def nl_block(category: str):
+    st.markdown("###### Natural language mode (English)")
+    en_hint = {
+        "Mathematics": "e.g., Plot y = sin(x) from -6.28 to 6.28",
+        "Statistics":  "e.g., histogram with 10 bins for data 1, 1.2, 0.9, 1.5, 2.1; or scatter x:[1,2,3] y:[2,3,5]",
+        "Physics":     "e.g., draw an inclined plane FBD at 30 degrees for a 2 kg block with friction 0.2, show components and friction; or projectile with v0=20, angle=45",
+        "Chemistry":   "e.g., benzene ring with CH3 at position 1 and NO2 at position 4; or molecule CH3-CH2-OH",
+    }
+    nl_text = st.text_area("Describe the figure (English only)", value="", height=110, placeholder=en_hint.get(category, "Describe..."))
+    ir_preview = None
+    if st.button("Parse & Preview", key=f"parse_{category}"):
+        try:
+            ir = nl_parse_and_render(nl_text, category, preview_only=True)
+            ir_preview = ir
+            st.success("Parsed successfully. Please review the parameters below.")
+            st.json(ir_preview)
+        except ValidationError as ve:
+            st.error(str(ve))
+        except Exception as e:
+            st.error(f"Parse failed: {e}")
+    gen_click = st.button("Generate from NL", key=f"gen_{category}")
+    return nl_text, ir_preview, gen_click
+
 # --------- Category UI ----------
-def category_ui() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+def category_ui() -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     tabs = st.tabs(["🧮 Mathematics", "📊 Statistics", "🧲 Physics", "🧪 Chemistry"])
     struct = category_structure()
     for tab, label in zip(tabs, struct.keys()):
@@ -258,26 +285,36 @@ def category_ui() -> Tuple[Optional[str], Optional[str], Optional[str]]:
             st.subheader(label)
             sub = st.selectbox("Subcategory", struct[label], key=f"sub_{label}")
 
-            # Hook forms
+            # NL mode toggle
+            nl_mode = st.toggle("Natural language mode (English)", value=False, key=f"nl_{label}")
+
+            if nl_mode:
+                nl_text, ir_preview, gen_click = nl_block(label)
+                if gen_click:
+                    return nl_text, label, sub, "NL"
+                # still allow fallback forms below if desired
+                st.divider()
+
+            # Hook forms (classic)
             if label == "Mathematics" and sub == "Vector Analysis":
                 form_prompt = render_math_vector_form()
-                with st.expander("Or type instruction directly"):
+                with st.expander("Or type directive directly"):
                     ta_val = st.text_area("Instruction", key=f"ta_{label}_{sub}", height=140)
                     if st.button(f"Generate in {label} · {sub} (text)", key=f"go_{label}_{sub}_text"):
-                        return ta_val, "Mathematics", sub
+                        return ta_val, "Mathematics", sub, "DIRECTIVE"
                 if form_prompt:
-                    return form_prompt, "Mathematics", sub
-                return None, None, None
+                    return form_prompt, "Mathematics", sub, "DIRECTIVE"
+                return None, None, None, None
 
             if label == "Statistics":
                 form_prompt = render_stats_form(sub)
-                with st.expander("Or type instruction directly"):
+                with st.expander("Or type directive directly"):
                     ta_val = st.text_area("Instruction", key=f"ta_{label}_{sub}", height=140)
                     if st.button(f"Generate in {label} · {sub} (text)", key=f"go_{label}_{sub}_text"):
-                        return ta_val, "Statistics", sub
+                        return ta_val, "Statistics", sub, "DIRECTIVE"
                 if form_prompt:
-                    return form_prompt, "Statistics", sub
-                return None, None, None
+                    return form_prompt, "Statistics", sub, "DIRECTIVE"
+                return None, None, None, None
 
             if label == "Physics":
                 if sub == "Classical Mechanics":
@@ -286,50 +323,55 @@ def category_ui() -> Tuple[Optional[str], Optional[str], Optional[str]]:
                     form_prompt = render_em_form(sub)
                 else:
                     form_prompt = None
-                with st.expander("Or type instruction directly"):
+                with st.expander("Or type directive directly"):
                     ta_val = st.text_area("Instruction", key=f"ta_{label}_{sub}", height=140)
                     if st.button(f"Generate in {label} · {sub} (text)", key=f"go_{label}_{sub}_text"):
-                        return ta_val, "Physics", sub
+                        return ta_val, "Physics", sub, "DIRECTIVE"
                 if form_prompt:
-                    return form_prompt, "Physics", sub
-                return None, None, None
+                    return form_prompt, "Physics", sub, "DIRECTIVE"
+                return None, None, None, None
 
             if label == "Chemistry":
                 form_prompt = render_chem_form(sub)
-                with st.expander("Or type instruction directly"):
+                with st.expander("Or type directive directly"):
                     ta_val = st.text_area("Instruction", key=f"ta_{label}_{sub}", height=140)
                     if st.button(f"Generate in {label} · {sub} (text)", key=f"go_{label}_{sub}_text"):
-                        return ta_val, "Chemistry", sub
+                        return ta_val, "Chemistry", sub, "DIRECTIVE"
                 if form_prompt:
-                    return form_prompt, "Chemistry", sub
-                return None, None, None
+                    return form_prompt, "Chemistry", sub, "DIRECTIVE"
+                return None, None, None, None
 
             # Default text-only flow for other subcategories
             ta_val = st.text_area("Instruction", key=f"ta_{label}_{sub}", height=160)
             if st.button(f"Generate in {label} · {sub}", key=f"go_{label}_{sub}"):
-                return ta_val, label, sub
-    return None, None, None
+                return ta_val, label, sub, "DIRECTIVE"
+    return None, None, None, None
 
 # --------- Main ----------
 def main_page():
     header_bar()
-    st.markdown("### Generate TikZ/LaTeX from natural language (no subject prefixes needed)")
-    prompt, category, subcategory = category_ui()
+    st.markdown("### Generate TikZ/LaTeX from natural language or structured directives")
+    prompt, category, subcategory, mode = category_ui()
     if prompt and category:
         try:
-            result: GenerationResult = generate_document(prompt, category, subcategory)
-            st.success(f"Generated successfully in {category} · {subcategory}")
+            if mode == "NL":
+                result: GenerationResult = nl_parse_and_render(prompt, category, preview_only=False)
+            else:
+                result: GenerationResult = generate_document(prompt, category, subcategory)
+            st.success(f"Generated successfully in {category} · {subcategory} ({'NL' if mode=='NL' else 'Directive/Form'})")
             st.code(result.latex, language="latex")
             c1, c2 = st.columns([1,2])
             with c1:
-                copy_button(result.latex, key="copy_tex_main")
+                copy_button(result.latex, key=f"copy_tex_{category}")
             with c2:
                 b = io.BytesIO(result.latex.encode("utf-8"))
                 st.download_button("⬇️ Download .tex", data=b, file_name="scientikz_output.tex", mime="text/plain")
             st.markdown(
                 "- Requires LaTeX packages (auto-included): tikz, pgfplots (if needed), circuitikz (if needed), chemfig (if needed)\n"
-                "- Compile: `pdflatex --shell-escape scientikz_output.tex`"
+                "- Compile: `pdflatex --halt-on-error scientikz_output.tex`"
             )
+        except ValidationError as ve:
+            st.error(str(ve))
         except Exception as e:
             st.error(f"Error: {e}")
 
