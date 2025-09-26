@@ -38,7 +38,6 @@ def ensure_len_eq(xs: List[float], ys: List[float], ctx="pairs"):
         raise ValidationError(f"[{ctx}] x/y length mismatch or empty")
 
 def preflight_latex(body: str):
-    # simple environment balance
     pairs = [
         ("\\begin{tikzpicture}", "\\end{tikzpicture}"),
         ("\\begin{axis}", "\\end{axis}"),
@@ -52,13 +51,15 @@ def preflight_latex(body: str):
     if len(body) > 200_000:
         raise ValidationError("LaTeX body too large (>200k chars)")
 
-# ---------- Fallback detection (for directive path) ----------
+# ---------- Category detect for directive path ----------
 def detect_category(prompt: str) -> Category:
     p = prompt.lower()
-    if any(k in p for k in ["mode=scatter","mode=hist","mode=regression","normal curve"]):
+    if any(k in p for k in ["mode=scatter","mode=hist","mode=regression","normal curve","boxplot","qq"]):
         return "Statistics"
-    if any(k in p for k in ["vectoranalysis:","mode=incline","mode=projectile","mode=circuit","inclined","circuit"]):
-        return "Physics" if "mode=" in p and "circuit" in p or "projectile" in p or "incline" in p else "Math"
+    if any(k in p for k in ["vectoranalysis:"]):
+        return "Math"
+    if any(k in p for k in ["mode=incline","mode=projectile","mode=circuit","inclined","circuit"]):
+        return "Physics"
     if any(k in p for k in ["mode=benzene","mode=raw","chemfig","molecule"]):
         return "Chemistry"
     return "Math"
@@ -78,14 +79,20 @@ def _wrap_document(body: str, needs_pgfplots: bool, needs_circuitikz: bool, need
 
 # ===================== Renderers (IR → TikZ) =====================
 
-# ---- Math (function plot) ----
+# ---- Math: function plot (for NL) ----
 def render_math_function(ir: Dict[str, Any]) -> Tuple[str,bool]:
     expr = ir.get("expr", "sin(deg(x))")
-    x0 = ir.get("x0", -6.28)
-    x1 = ir.get("x1", 6.28)
+    x0 = float(ir.get("x0", -6.28))
+    x1 = float(ir.get("x1", 6.28))
+    if x0 >= x1:
+        raise ValidationError("range invalid: left bound must be < right bound")
     body = rf"""
 \begin{{tikzpicture}}
-\begin{{axis}}[axis lines=middle, xlabel=$x$, ylabel=$y$, domain={_fmt(x0)}:{_fmt(x1)}, samples=300, grid=both]
+\begin{{axis}}[
+  axis lines=middle,
+  xlabel=$x$, ylabel=$y$,
+  domain={_fmt(x0)}:{_fmt(x1)}, samples=300, grid=both
+]
 \addplot {{{expr}}};
 \end{{axis}}
 \end{{tikzpicture}}
@@ -93,12 +100,108 @@ def render_math_function(ir: Dict[str, Any]) -> Tuple[str,bool]:
     preflight_latex(body)
     return body, True
 
-# ---- Vector Analysis (kept as directive style) ----
-def render_vector_analysis_from_directive(prompt: str) -> Tuple[str,bool]:
-    # Minimal extraction; keep previous behavior for directives
-    # (Omitted for brevity: full vector rendering present earlier version)
-    # For NL MVP we focus on function plot; you can still use directive UI for vectors.
-    return "% VectorAnalysis UI uses directive path; keep your previous version here.", False
+# ---- Math: Vector Analysis (directive/UI path) ----
+def _axis_block(ax_lim: float, ay_lim: float, grid: bool) -> str:
+    return rf"""axis lines=middle, xmin={-_fmt(ax_lim)}, xmax={_fmt(ax_lim)},
+ymin={-_fmt(ay_lim)}, ymax={_fmt(ay_lim)}, xlabel=$x$, ylabel=$y$, {"grid=both," if grid else ""} axis equal image"""
+
+def _vec(x0,y0, vx,vy, color="blue", thick=True, label=None) -> str:
+    lab = f" node[above right] {{{label}}}" if label else ""
+    w = "very thick" if thick else "thick"
+    return rf"\draw[->,{w},{color}] ({_fmt(x0)},{_fmt(y0)}) -- ({_fmt(x0+vx)},{_fmt(y0+vy)}){lab};"
+
+def _dashed(x1,y1, x2,y2) -> str:
+    return rf"\draw[dashed, gray] ({_fmt(x1)},{_fmt(y1)}) -- ({_fmt(x2)},{_fmt(y2)});"
+
+def render_vector_from_directive(prompt: str) -> Tuple[str,bool]:
+    """
+    Directive grammar (produced by form):
+    VectorAnalysis: mode=single|pair, v=(vx,vy) origin=(x0,y0) components=true unit=true grid=... axes=(ax,ay)
+    or with a=(ax,ay) b=(bx,by) and flags sum/diff/parallelogram/angle/projection_a_on_b/dot
+    """
+    p = prompt
+    ax_lim = float(_extract(p, r"axes=\(\s*([-\d\.]+)\s*,") or 6.0)
+    ay_lim = float(_extract(p, r"axes=\(\s*[-\d\.]+\s*,\s*([-\d\.]+)\s*\)") or 6.0)
+    grid   = _b(_extract(p, r"grid\s*=\s*(\w+)") or "true")
+    mode   = _extract(p, r"mode\s*=\s*(\w+)") or "single"
+
+    if mode == "single":
+        vx = float(_extract(p, r"v=\(\s*([-\d\.]+)") or 3.0)
+        vy = float(_extract(p, r"v=\(\s*[-\d\.]+\s*,\s*([-\d\.]+)\)") or 2.0)
+        x0 = float(_extract(p, r"origin=\(\s*([-\d\.]+)") or 0.0)
+        y0 = float(_extract(p, r"origin=\(\s*[-\d\.]+\s*,\s*([-\d\.]+)\)") or 0.0)
+        components = _b(_extract(p, r"components\s*=\s*(\w+)") or "true")
+        unit = _b(_extract(p, r"unit\s*=\s*(\w+)") or "true")
+
+        segs = [rf"\begin{{tikzpicture}}", rf"\begin{{axis}}[{_axis_block(ax_lim,ay_lim,grid)}]"]
+        segs.append(_vec(x0,y0,vx,vy,"blue",True,"\\vec v"))
+        if components:
+            segs.append(_dashed(x0,y0, x0+vx, y0))
+            segs.append(_dashed(x0+vx,y0, x0+vx, y0+vy))
+            segs.append(rf"\node[below] at ({_fmt(x0+vx)},{_fmt(y0)}) {{$v_x={_fmt(vx)}$}};")
+            segs.append(rf"\node[left]  at ({_fmt(x0)},{_fmt(y0+vy)}) {{$v_y={_fmt(vy)}$}};")
+        if unit and (vx!=0 or vy!=0):
+            norm = math.sqrt(vx*vx+vy*vy)
+            ux, uy = vx/norm, vy/norm
+            segs.append(_vec(x0,y0,ux,uy,"orange",False,"\\hat v"))
+        segs += [r"\end{axis}", r"\end{tikzpicture}"]
+        body = "\n".join(segs) + "\n"
+        preflight_latex(body)
+        return body, True
+
+    # pair mode
+    ax = float(_extract(p, r"a=\(\s*([-\d\.]+)") or 2.0)
+    ay = float(_extract(p, r"a=\(\s*[-\d\.]+\s*,\s*([-\d\.]+)\)") or 1.0)
+    bx = float(_extract(p, r"b=\(\s*([-\d\.]+)") or 1.0)
+    by = float(_extract(p, r"b=\(\s*[-\d\.]+\s*,\s*([-\d\.]+)\)") or 3.0)
+    sum_on  = _b(_extract(p, r"sum\s*=\s*(\w+)") or "true")
+    diff_on = _b(_extract(p, r"diff\s*=\s*(\w+)") or "false")
+    para_on = _b(_extract(p, r"parallelogram\s*=\s*(\w+)") or "true")
+    ang_on  = _b(_extract(p, r"angle\s*=\s*(\w+)") or "true")
+    proj_on = _b(_extract(p, r"projection_a_on_b\s*=\s*(\w+)") or "true")
+    dot_on  = _b(_extract(p, r"dot\s*=\s*(\w+)") or "false")
+
+    segs = [rf"\begin{{tikzpicture}}", rf"\begin{{axis}}[{_axis_block(ax_lim,ay_lim,grid)}]"]
+    segs.append(_vec(0,0, ax,ay, "blue", True, "\\vec a"))
+    segs.append(_vec(0,0, bx,by, "red", True,  "\\vec b"))
+
+    if para_on:
+        segs.append(_dashed(ax,ay, ax+bx, ay+by))
+        segs.append(_dashed(bx,by, ax+bx, ay+by))
+
+    if sum_on:
+        segs.append(_vec(0,0, ax+bx, ay+by, "purple", True, "\\vec a+\\vec b"))
+
+    if diff_on:
+        segs.append(_vec(bx,by, ax,ay, "teal", True, "\\vec a-\\vec b"))
+
+    if ang_on:
+        def angle(a,b):
+            na = math.hypot(*a); nb = math.hypot(*b)
+            if na==0 or nb==0: return 0
+            c = (a[0]*b[0]+a[1]*b[1])/(na*nb)
+            c = max(-1,min(1,c))
+            return math.degrees(math.acos(c))
+        ang = angle((ax,ay),(bx,by))
+        segs.append(rf"\draw (0,0) ++(0.8,0) arc (0:{{{_fmt(ang)}}}:0.8);")
+        segs.append(rf"\node at (1.2,0.5) {{$\angle(\vec a,\vec b)={_fmt(ang)}^\circ$}};")
+
+    if proj_on:
+        # projection of a onto b
+        bnorm2 = bx*bx+by*by
+        if bnorm2>0:
+            t = (ax*bx+ay*by)/bnorm2
+            px, py = t*bx, t*by
+            segs.append(_dashed(ax,ay, px,py))
+            segs.append(_vec(0,0, px,py, "gray!60!black", False, "\\mathrm{proj}_{\\vec b}\\vec a"))
+
+    if dot_on:
+        segs.append(rf"\node[anchor=south west] at (rel axis cs:0.02,0.98) {{$\vec a\cdot \vec b={_fmt(ax*bx+ay*by)}$}};")
+
+    segs += [r"\end{axis}", r"\end{tikzpicture}"]
+    body = "\n".join(segs) + "\n"
+    preflight_latex(body)
+    return body, True
 
 # ---- Statistics ----
 def _parse_num_list(txt: str):
@@ -138,11 +241,8 @@ def render_stats_hist(ir: Dict[str, Any]) -> Tuple[str,bool]:
     body = rf"""
 \begin{{tikzpicture}}
 \begin{{axis}}[
-  ybar interval,
-  ymin=0,
-  xlabel=Value,
-  ylabel=Count,
-  grid=both
+  ybar interval, ymin=0,
+  xlabel=Value, ylabel=Count, grid=both
 ]
 \addplot+[
   hist={{bins={bins}}},
@@ -201,6 +301,83 @@ def render_stats_normal(ir: Dict[str, Any]) -> Tuple[str,bool]:
 """
     preflight_latex(body)
     return body, True
+
+def render_stats_boxplot(ir: Dict[str, Any]) -> Tuple[str,bool]:
+    data = sorted(ir["data"])
+    if len(data) < 4:
+        raise ValidationError("boxplot needs at least 4 observations")
+    # simple quartiles
+    def q(p):
+        idx = (len(data)-1)*p
+        lo = int(math.floor(idx)); hi = int(math.ceil(idx))
+        if lo==hi: return data[lo]
+        return data[lo]*(hi-idx)+data[hi]*(idx-lo)
+    q1, q2, q3 = q(0.25), q(0.5), q(0.75)
+    iqr = q3-q1
+    lo_whisk = min(x for x in data if x>=q1-1.5*iqr)
+    hi_whisk = max(x for x in data if x<=q3+1.5*iqr)
+    # Outliers not plotted separately in this minimal version (could add)
+    body = rf"""
+\begin{{tikzpicture}}
+\begin{{axis}}[
+  ytick=\empty, xmin={_fmt(min(data)-0.5)}, xmax={_fmt(max(data)+0.5)},
+  height=3.2cm, axis lines=left, xlabel=Value, grid=both
+]
+\addplot+[
+  boxplot prepared={{
+    lower whisker={_fmt(lo_whisk)},
+    lower quartile={_fmt(q1)},
+    median={_fmt(q2)},
+    upper quartile={_fmt(q3)},
+    upper whisker={_fmt(hi_whisk)}
+  }},
+] coordinates {{ }};
+\end{{axis}}
+\end{{tikzpicture}}
+"""
+    preflight_latex(body)
+    return body, True
+
+def render_stats_qq(ir: Dict[str, Any]) -> Tuple[str,bool]:
+    data = sorted(ir["data"])
+    if len(data) < 5:
+        raise ValidationError("QQ plot needs at least 5 observations")
+    n = len(data)
+    # theoretical quantiles for N(0,1): use approx inverse CDF (Beasley-Springer/Moro could be used;
+    # here rely on pgfplots expression to compute quantiles is hard, so just numeric approx using python)
+    # Use a simple approximation via math.erf^{-1}
+    def inv_norm_cdf(p):
+        # Abramowitz-Stegun approximation via inverse erf
+        return math.sqrt(2)*_inv_erf(2*p-1)
+    xs, ys = [], []
+    for i, y in enumerate(data, start=1):
+        p = (i-0.5)/n
+        xs.append(inv_norm_cdf(p))
+        ys.append(y)
+    pairs = "\n".join(f"{_fmt(a)}\t{_fmt(b)}" for a,b in zip(xs,ys))
+    body = rf"""
+\begin{{tikzpicture}}
+\begin{{axis}}[
+  axis equal image,
+  xlabel=Theoretical quantiles $N(0,1)$, ylabel=Sample quantiles, grid=both
+]
+\addplot[only marks, mark=*] table[row sep=crcr]{{
+{pairs}
+}};
+\addplot[domain={_fmt(min(xs))}:{_fmt(max(xs))}, samples=2] {{ x }};
+\end{{axis}}
+\end{{tikzpicture}}
+"""
+    preflight_latex(body)
+    return body, True
+
+def _inv_erf(x):
+    # approximation by Winitzki
+    a = 0.147
+    sgn = 1 if x>=0 else -1
+    ln = math.log(1-x*x)
+    first = 2/(math.pi*a) + ln/2
+    return sgn * math.sqrt( math.sqrt(first*first - ln/a) - first )
 
 # ---- Physics ----
 def render_incline(ir: Dict[str, Any]) -> Tuple[str,bool,bool]:
@@ -265,19 +442,31 @@ def render_circuit(ir: Dict[str, Any]) -> Tuple[str,bool,bool]:
     V = float(ir.get("V", 9.0))
     Rs = list(map(float, ir.get("R", [100,220,330])))
     labels = bool(ir.get("labels", True))
+    show_current = bool(ir.get("show_current", True))
+    show_meter_v = bool(ir.get("voltmeter", False))
+    show_meter_a = bool(ir.get("ammeter", False))
     if len(Rs) == 0:
         raise ValidationError("R list is empty")
 
     if topo == "series":
         x2 = 0.0
-        segs = []
-        segs.append(f"\\begin{{circuitikz}}[european]")
+        segs = [f"\\begin{{circuitikz}}[european]"]
         segs.append(f"  \\draw (0,0) to[battery1,l_={_fmt(V)} V] (0,3)")
+        last = "(0,3)"
         for i, R in enumerate(Rs, start=1):
             x2 += 2.5
             lab = f",l_=R{i}={_fmt(R)}\\\\$\\Omega$" if labels else ""
-            segs.append(f"    to[R{lab}] ({_fmt(x2)},3)")
-        segs.append(f"    -- ({_fmt(x2)},0) -- (0,0);")
+            curr = ", i>^=I{}".format(i) if show_current else ""
+            segs.append(f"    to[R{lab}{curr}] ({_fmt(x2)},3)")
+            last = f"({_fmt(x2)},3)"
+        # meters
+        if show_meter_v:
+            segs.append(f"    to[voltmeter] ({_fmt(x2+1.8)},3)")
+            last = f"({_fmt(x2+1.8)},3)"
+        if show_meter_a:
+            segs.append(f"    to[ammeter] ({_fmt(x2+3.2)},3)")
+            last = f"({_fmt(x2+3.2)},3)"
+        segs.append(f"    -- {last.replace(',3',',0')} -- (0,0);")
         segs.append("\\end{circuitikz}")
         body = "\n".join(segs) + "\n"
         preflight_latex(body)
@@ -290,8 +479,13 @@ def render_circuit(ir: Dict[str, Any]) -> Tuple[str,bool,bool]:
     y = height - 1.0
     for i, R in enumerate(Rs, start=1):
         lab = f",l_=R{i}={_fmt(R)}\\\\$\\Omega$" if labels else ""
-        segs.append(f"  \\draw (5,{_fmt(y)}) to[R{lab}] (5,{_fmt(y-1.0)}) -- (0,{_fmt(y-1.0)});")
+        curr = ", i>^=I{}".format(i) if show_current else ""
+        segs.append(f"  \\draw (5,{_fmt(y)}) to[R{lab}{curr}] (5,{_fmt(y-1.0)}) -- (0,{_fmt(y-1.0)});")
         y -= 1.2
+    if show_meter_v:
+        segs.append(f"  \\draw (5,{_fmt(height)}) to[voltmeter] (7,{_fmt(height)});")
+    if show_meter_a:
+        segs.append(f"  \\draw (0,{_fmt(height)}) to[ammeter] (-2,{_fmt(height)});")
     segs.append("\\end{circuitikz}")
     body = "\n".join(segs) + "\n"
     preflight_latex(body)
@@ -331,11 +525,9 @@ def render_molecule(ir: Dict[str, Any]) -> Tuple[str,bool]:
 # Math NL: function plot
 def parse_math_en(text: str) -> Dict[str, Any]:
     t = text.strip()
-    # e.g., "Plot y = sin(x) from -6.28 to 6.28" or "plot y=exp(-x^2) from -2 to 2"
     m = re.search(r"plot\s+y\s*=\s*([^;]+?)\s+from\s+([-\d\.]+)\s+to\s+([-\d\.]+)", t, re.IGNORECASE)
     if m:
         expr = m.group(1).strip()
-        # normalize common functions for pgfplots
         expr = expr.replace("sin(x)", "sin(deg(x))").replace("cos(x)", "cos(deg(x))")
         x0 = float(m.group(2)); x1 = float(m.group(3))
         if x0 >= x1: raise ValidationError("range invalid: left bound must be < right bound")
@@ -344,54 +536,62 @@ def parse_math_en(text: str) -> Dict[str, Any]:
 
 # Statistics NL
 def parse_stats_en(text: str) -> Dict[str, Any]:
-    t = text.lower().strip()
-
-    # histogram: "histogram with 10 bins for data 1, 1.2, 0.9"
+    # histogram
     mh = re.search(r"(?:hist|histogram).*(?:with\s+([0-9]+)\s+bins?)?.*?(?:data|values?)\s*([\[\(]?[0-9\.\,\s\-]+[\]\)]?)", text, re.IGNORECASE)
     if mh:
         bins = int(mh.group(1)) if mh.group(1) else 10
         nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", mh.group(2))]
         return {"task":"hist","bins":bins,"data":nums}
 
-    # scatter: "scatter x:[1,2,3] y:[2,3,5]"
+    # scatter
     ms = re.search(r"scatter.*?x[:=]\s*[\[\(]([^\]\)]*)[\]\)].*?y[:=]\s*[\[\(]([^\]\)]*)[\]\)]", text, re.IGNORECASE)
     if ms:
         xs = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", ms.group(1))]
         ys = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", ms.group(2))]
         return {"task":"scatter","x":xs,"y":ys}
 
-    # regression: "linear regression x:[...] y:[...]"
+    # regression
     mr = re.search(r"(?:linear\s+)?regression.*?x[:=]\s*[\[\(]([^\]\)]*)[\]\)].*?y[:=]\s*[\[\(]([^\]\)]*)[\]\)]", text, re.IGNORECASE)
     if mr:
         xs = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", mr.group(1))]
         ys = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", mr.group(2))]
         return {"task":"regression","x":xs,"y":ys}
 
-    # normal curve: "normal curve mu=0 sigma=1 from -4 to 4"
+    # normal curve
     mn = re.search(r"normal\s+curve.*?mu\s*=\s*([-\d\.]+).*?sigma\s*=\s*([-\d\.]+).*?from\s+([-\d\.]+)\s+to\s+([-\d\.]+)", text, re.IGNORECASE)
     if mn:
         return {"task":"normal","mu":float(mn.group(1)),"sigma":float(mn.group(2)),"a":float(mn.group(3)),"b":float(mn.group(4))}
 
-    raise ValidationError("Unrecognized statistics instruction. Examples: 'histogram with 10 bins for data 1,1.2,...' or 'scatter x:[...] y:[...]'")
+    # boxplot
+    mb = re.search(r"box\s*plot|boxplot", text, re.IGNORECASE)
+    if mb:
+        nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", text)]
+        if not nums: raise ValidationError("Provide numbers for boxplot, e.g., 'boxplot data 1,2,3,4,5'")
+        return {"task":"boxplot","data":nums}
+
+    # qq plot
+    mq = re.search(r"(qq\s*plot|normal\s*probability\s*plot)", text, re.IGNORECASE)
+    if mq:
+        nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", text)]
+        if not nums: raise ValidationError("Provide numbers for QQ plot, e.g., 'qq plot data 1,2,3,4,5'")
+        return {"task":"qq","data":nums}
+
+    raise ValidationError("Unrecognized statistics instruction. Examples: histogram/scatter/regression/boxplot/qq plot ...")
 
 # Physics NL
 def parse_physics_en(text: str) -> Dict[str, Any]:
     t = text.lower().replace("°","").strip()
 
-    # Inclined plane FBD
-    # e.g., "draw an inclined plane FBD at 30 degrees for a 2 kg block with friction 0.2, show components and friction, no tension"
     if "inclined" in t or "fbd" in t or "incline" in t:
-        theta = _first_num(t, r"(?:at|angle|theta)\s*([0-9]+(?:\.[0-9]+)?)") or 30.0
-        mass  = _first_num(t, r"(?:mass|m)\s*([0-9]+(?:\.[0-9]+)?)") or 2.0
-        mu    = _first_num(t, r"(?:friction|mu|coefficient)\s*([0-9]+(?:\.[0-9]+)?)") or 0.2
+        theta = _first_num(t, r"(?:at|angle|alpha|theta)\s*=?\s*([0-9]+(?:\.[0-9]+)?)") or 30.0
+        mass  = _first_num(t, r"(?:mass|m)\s*=?\s*([0-9]+(?:\.[0-9]+)?)") or 2.0
+        mu    = _first_num(t, r"(?:friction|mu|coefficient)\s*=?\s*([0-9]+(?:\.[0-9]+)?)") or 0.2
         components = "no components" not in t
         friction   = "no friction" not in t
         tension    = ("tension" in t) and ("no tension" not in t)
         return {"task":"incline_fbd","theta":theta,"mass":mass,"mu":mu,
                 "components":components,"friction":friction,"tension":tension}
 
-    # Projectile
-    # e.g., "projectile with v0=20 and angle=45, g=9.8, mark range and apex"
     if "projectile" in t or "trajectory" in t:
         v0 = _first_num(text, r"v0\s*=\s*([-\d\.]+)") or _first_num(text, r"speed\s*([-\d\.]+)") or 20.0
         alpha = _first_num(text, r"(?:angle|alpha)\s*=?\s*([-\d\.]+)") or 45.0
@@ -399,16 +599,19 @@ def parse_physics_en(text: str) -> Dict[str, Any]:
         marks = "no mark" not in t and "no marks" not in t
         return {"task":"projectile","v0":v0,"alpha":alpha,"g":g,"marks":marks}
 
-    # Circuit (series/parallel)
-    # e.g., "series circuit at 9V with resistors 100,220,330 and labels"
     if "circuit" in t:
         topo = "parallel" if "parallel" in t else "series"
         V = _first_num(text, r"([-\d\.]+)\s*v") or _first_num(text, r"\bv\s*=\s*([-\d\.]+)") or 9.0
-        Rs = [float(x) for x in re.findall(r"(?:resistors?|r)\s*(?:=|:)?\s*([0-9\.\,\s]+)", text, re.IGNORECASE)[0].split(",")] if re.search(r"(?:resistors?|r)\s*(?:=|:)?\s*([0-9\.\,\s]+)", text, re.IGNORECASE) else [100,220,330]
+        Rs_match = re.search(r"(?:resistors?|r)\s*(?:=|:)?\s*([0-9\.\,\s]+)", text, re.IGNORECASE)
+        Rs = [float(x) for x in Rs_match.group(1).split(",")] if Rs_match else [100,220,330]
         labels = "no label" not in t and "no labels" not in t
-        return {"task":"circuit","topology":topo,"V":V,"R":Rs,"labels":labels}
+        show_current = "no current" not in t
+        voltmeter = "voltmeter" in t
+        ammeter = "ammeter" in t
+        return {"task":"circuit","topology":topo,"V":V,"R":Rs,"labels":labels,
+                "show_current":show_current,"voltmeter":voltmeter,"ammeter":ammeter}
 
-    raise ValidationError("Unrecognized physics instruction. Examples: 'inclined plane ...', 'projectile with v0=20 angle=45', 'series circuit 9V resistors 100,220'")
+    raise ValidationError("Unrecognized physics instruction.")
 
 def _first_num(text: str, pat: str) -> Optional[float]:
     m = re.search(pat, text, re.IGNORECASE)
@@ -418,32 +621,26 @@ def _first_num(text: str, pat: str) -> Optional[float]:
 def parse_chem_en(text: str) -> Dict[str, Any]:
     t = text.lower().strip()
 
-    # benzene ring with CH3 at position 1 and NO2 at position 4
     if "benzene" in t or "ring" in t:
         subs = []
-        # capture patterns like "CH3 at position 1", "NO2 at 4"
         for chem, pos in re.findall(r"([A-Za-z0-9\+\-]{1,10})\s+at\s+(?:position\s+)?([1-6])", text, re.IGNORECASE):
             subs.append(f"{pos}-{chem}")
         if not subs:
-            # also allow "1-CH3,4-NO2"
             parts = re.findall(r"([1-6]\s*-\s*[A-Za-z0-9\+\-]{1,10})", text)
             subs = [p.replace(" ", "") for p in parts] or ["1-CH3"]
         return {"task":"benzene","subs":subs}
 
-    # raw molecule CH3-CH2-OH
     if "molecule" in t or "chemfig" in t or re.search(r"[A-Za-z0-9]+\-[A-Za-z0-9\-]+", text):
         m = re.search(r"(?:molecule\s*)?([A-Za-z0-9\-\+\(\)]+)", text)
         mol = m.group(1) if m else "H2O"
         return {"task":"molecule","mol":mol}
 
-    raise ValidationError("Unrecognized chemistry instruction. Examples: 'benzene ring with CH3 at position 1 and NO2 at position 4' or 'molecule CH3-CH2-OH'")
+    raise ValidationError("Unrecognized chemistry instruction.")
 
 # ===================== Dispatcher =====================
 
 def generate_document(prompt: str, category_hint: str, subcategory_hint: Optional[str] = None) -> GenerationResult:
-    """
-    Directive/Form path (no NL parsing): category_hint decides the route.
-    """
+    """Directive/Form path (no NL parsing): category_hint decides the route."""
     _map = {"Mathematics":"Math","Math":"Math","Statistics":"Statistics","Physics":"Physics","Chemistry":"Chemistry","Auto":"Auto"}
     hint = _map.get(category_hint, "Auto")
     cat = detect_category(prompt) if hint == "Auto" else hint
@@ -454,9 +651,8 @@ def generate_document(prompt: str, category_hint: str, subcategory_hint: Optiona
 
     if cat == "Math":
         if prompt.strip().lower().startswith("vectoranalysis:"):
-            body, needs_pgfplots = render_vector_analysis_from_directive(prompt)
+            body, needs_pgfplots = render_vector_from_directive(prompt)
         else:
-            # try function directive "Plot y = ... from ... to ..."
             ir = parse_math_en(prompt)  # allow English directive phrase
             body, needs_pgfplots = render_math_function(ir)
 
@@ -477,6 +673,14 @@ def generate_document(prompt: str, category_hint: str, subcategory_hint: Optiona
             ys = _parse_num_list(_extract(prompt, r"y\s*=\s*\[([^\]]*)\]"))
             ir = {"task":"regression","x":xs,"y":ys}
             body, needs_pgfplots = render_stats_regression(ir)
+        elif "boxplot" in p:
+            data = _parse_num_list(_extract(prompt, r"data\s*=\s*\[([^\]]*)\]"))
+            ir = {"task":"boxplot","data":data}
+            body, needs_pgfplots = render_stats_boxplot(ir)
+        elif "qq" in p:
+            data = _parse_num_list(_extract(prompt, r"data\s*=\s*\[([^\]]*)\]"))
+            ir = {"task":"qq","data":data}
+            body, needs_pgfplots = render_stats_qq(ir)
         elif "normal curve" in p:
             ir = {
                 "task":"normal",
@@ -487,7 +691,6 @@ def generate_document(prompt: str, category_hint: str, subcategory_hint: Optiona
             }
             body, needs_pgfplots = render_stats_normal(ir)
         else:
-            # try NL parser as fallback in stats tab
             ir = parse_stats_en(prompt)
             body, needs_pgfplots = _render_stats_by_ir(ir)
 
@@ -521,10 +724,12 @@ def generate_document(prompt: str, category_hint: str, subcategory_hint: Optiona
                 "V": float(_extract(prompt, r"\bV\s*=\s*([-\d\.]+)") or 9.0),
                 "R": Rs if Rs else [100,220,330],
                 "labels": _b(_extract(prompt, r"labels\s*=\s*(\w+)") or "true"),
+                "show_current": _b(_extract(prompt, r"show_current\s*=\s*(\w+)") or "true"),
+                "voltmeter": _b(_extract(prompt, r"voltmeter\s*=\s*(\w+)") or "false"),
+                "ammeter": _b(_extract(prompt, r"ammeter\s*=\s*(\w+)") or "false"),
             }
             body, nplot, ncirc = render_circuit(ir); needs_pgfplots|=nplot; needs_circuitikz|=ncirc
         else:
-            # try NL
             ir = parse_physics_en(prompt)
             body, needs_pgfplots, needs_circuitikz = _render_physics_by_ir(ir)
 
@@ -542,7 +747,6 @@ def generate_document(prompt: str, category_hint: str, subcategory_hint: Optiona
         else:
             ir = parse_chem_en(prompt)
             body, needs_chemfig = _render_chem_by_ir(ir)
-
     else:
         body = "% Unrecognized category"
 
@@ -559,6 +763,8 @@ def _render_stats_by_ir(ir: Dict[str, Any]) -> Tuple[str,bool]:
     if t == "scatter": return render_stats_scatter(ir)
     if t == "regression": return render_stats_regression(ir)
     if t == "normal": return render_stats_normal(ir)
+    if t == "boxplot": return render_stats_boxplot(ir)
+    if t == "qq": return render_stats_qq(ir)
     raise ValidationError(f"Unsupported stats IR task: {t}")
 
 def _render_physics_by_ir(ir: Dict[str, Any]) -> Tuple[str,bool,bool]:
@@ -576,10 +782,6 @@ def _render_chem_by_ir(ir: Dict[str, Any]) -> Tuple[str,bool]:
 
 # ---------- NL unified entry (for app NL mode) ----------
 def nl_parse_and_render(text: str, category_hint: str, preview_only: bool=False) -> Any:
-    """
-    If preview_only=True: return IR only.
-    Else: return GenerationResult with compiled LaTeX doc.
-    """
     cat_map = {"Mathematics":"Math","Math":"Math","Statistics":"Statistics","Physics":"Physics","Chemistry":"Chemistry"}
     cat = cat_map.get(category_hint, "Math")
 
