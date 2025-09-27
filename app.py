@@ -25,7 +25,7 @@ st.set_page_config(
 )
 
 st.title("ScienTikZ")
-st.caption("Generate TikZ/LaTeX from natural language or structured directives")
+st.caption("You Input Text Naturally, I Provide You Codes TikZily")
 
 # -------------------------------
 # Supabase 客户端（可选）
