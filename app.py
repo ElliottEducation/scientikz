@@ -1,4 +1,6 @@
+# app.py
 import os
+from io import BytesIO
 import streamlit as st
 
 # 可选依赖：若没连 Supabase，也能离线运行
@@ -24,8 +26,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("ScienTikZ")
-st.caption("You Input Text Naturally, I Provide You Codes TikZily")
+st.markdown(
+    "<h1 style='margin-bottom:0'>ScienTikZ</h1>"
+    "<p style='opacity:.7;margin-top:4px'>You Input Text Naturally, I Provide You Codes TikZily</p>",
+    unsafe_allow_html=True,
+)
 
 # -------------------------------
 # Supabase 客户端（可选）
@@ -97,18 +102,16 @@ def sb_init_quota(user_id: str) -> None:
             .single()
             .execute()
         )
-        # 如果有记录，直接返回
         if getattr(row, "data", None):
             return
     except Exception:
-        # 可能是表不存在或 single() 报错，尝试 upsert
         pass
     try:
         supabase.table("usage_quota").upsert(
             {"user_id": user_id, "plan": "free", "free_quota": FREE_TRIALS, "used_count": 0}
         ).execute()
     except Exception:
-        pass  # 表还没建也不会影响页面
+        pass
 
 def sb_get_remaining(user_id: str) -> int | None:
     if not (SUPA_ENABLED and supabase and user_id):
@@ -130,7 +133,6 @@ def sb_consume_one(user_id: str) -> bool:
     if not (SUPA_ENABLED and supabase and user_id):
         return False
     try:
-        # 乐观更新：先读后写
         r = (
             supabase.table("usage_quota")
             .select("free_quota, used_count")
@@ -198,11 +200,9 @@ def can_generate() -> tuple[bool, str]:
         user_id = st.session_state.user.get("id", "")
         rem = sb_get_remaining(user_id)
         if rem is None:
-            # 表未建立或查询失败，允许但提示
             return True, "⚠️ Quota table not found; allowing generation."
         if rem <= 0:
             return False, "Your free quota has been used. Please upgrade plan."
-        # 还有额度
         return True, ""
     # 未登录：本地 3 次
     remain = FREE_TRIALS - int(st.session_state.anon_tries or 0)
@@ -217,14 +217,25 @@ def consume_one() -> None:
     else:
         st.session_state.anon_tries = int(st.session_state.anon_tries or 0) + 1
 
+# 安全包装，避免异常把页面打断
+def safe_generate(prompt: str, category: str, subcat: str) -> GenerationResult:
+    try:
+        return generate_document(prompt=prompt, category_hint=category, subcategory_hint=subcat)
+    except Exception as e:
+        return GenerationResult(
+            latex=f"% ERROR in generator: {e}\n% prompt={prompt}\n",
+            summary=str(e),
+            category=f"{category} · {subcat}",
+        )
+
 # -------------------------------
-# 主体：Tabs + 表单
+# 主体：Tabs + 表单（输入区域 1/4 宽）
 # -------------------------------
 disciplines = {
     "Mathematics": ["Algebra", "Vector Analysis", "Calculus"],
-    "Statistics": ["Probability", "Regression", "Distributions"],
-    "Physics": ["Classical Mechanics", "Electromagnetism", "Quantum Mechanics"],
-    "Chemistry": ["Organic", "Inorganic", "Molecules"],
+    "Statistics": ["Probability", "Regression (coming soon)", "Distributions (coming soon)"],
+    "Physics": ["Classical Mechanics", "Electromagnetism", "Projectile Motion"],
+    "Chemistry": ["Molecules", "Reactions", "Lab Apparatus"],
 }
 tabs = st.tabs(list(disciplines.keys()))
 
@@ -239,50 +250,64 @@ for idx, (disc_name, subcats) in enumerate(disciplines.items()):
             key=f"{key_prefix}_subcat",
         )
 
-        nl_mode = st.toggle(
+        st.toggle(
             "Natural language mode (English)",
-            value=True,
+            value=False,
             key=f"{key_prefix}_nl_toggle",
         )
 
-        instruction = st.text_area(
-            "Instruction",
-            placeholder=f"Describe the {disc_name.lower()} diagram or plot to generate...",
-            height=120,
-            key=f"{key_prefix}_instruction",
-        )
+        # 输入与按钮在左侧 1/4 宽；右侧展示结果
+        col_left, col_right = st.columns([1, 3])
 
-        # 额度提示
-        allowed, note = can_generate()
-        if note:
-            st.info(note)
+        with col_left:
+            instruction = st.text_area(
+                "Instruction",
+                placeholder=f"Describe the {disc_name.lower()} diagram or plot to generate...",
+                height=140,
+                key=f"{key_prefix}_instruction",
+            )
 
-        btn = st.button(
-            f"Generate in {disc_name} · {subcat}",
-            key=f"{key_prefix}_generate_btn",
-            disabled=not allowed,
-        )
+            allowed, note = can_generate()
+            if note:
+                st.info(note)
 
-        if btn:
-            if not instruction.strip():
-                st.warning("Please enter an instruction before generating.")
-            else:
-                with st.spinner("Generating LaTeX/TikZ code..."):
-                    result = generate_document(
-                        prompt=instruction,
-                        category_hint=disc_name,
-                        subcategory_hint=subcat,
-                    )
-                if isinstance(result, GenerationResult):
-                    consume_one()
-                    st.success("Generation completed!")
-                    st.code(result.latex, language="latex")
-                    st.download_button(
-                        label="Download .tex file",
-                        data=result.latex,
-                        file_name=f"{disc_name}_{subcat}.tex",
-                        mime="text/plain",
-                        key=f"{key_prefix}_download_btn",
-                    )
+            # 统计学“即将开放”的子类禁用按钮
+            coming_soon = ("coming soon" in subcat.lower())
+            btn = st.button(
+                f"Generate in {disc_name} · {subcat}",
+                key=f"{key_prefix}_generate_btn",
+                disabled=(not allowed) or coming_soon,
+                use_container_width=True,
+            )
+
+        with col_right:
+            if btn:
+                if not instruction.strip():
+                    st.warning("Please enter an instruction before generating.")
                 else:
-                    st.error("Failed to generate TikZ code.")
+                    with st.spinner("Generating LaTeX/TikZ code..."):
+                        result = safe_generate(
+                            prompt=instruction.strip(),
+                            category=disc_name,
+                            subcat=subcat.split(" (coming")[0],  # 去掉占位后缀
+                        )
+                    if isinstance(result, GenerationResult):
+                        consume_one()
+                        st.success("Generation completed!", icon="✅")
+                        st.code(result.latex, language="latex")
+                        # 下载 .tex
+                        st.download_button(
+                            label="Download .tex file",
+                            data=result.latex,
+                            file_name=f"{disc_name}_{subcat.split(' (coming')[0]}.tex",
+                            mime="text/plain",
+                            key=f"{key_prefix}_download_btn",
+                            use_container_width=True,
+                        )
+                    else:
+                        st.error("Failed to generate TikZ code.")
+
+# -------------------------------
+# 底部提示
+# -------------------------------
+st.caption("Offline mode (auth/payments via Supabase/Stripe are disabled in this MVP).")
