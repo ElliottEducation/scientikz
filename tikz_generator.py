@@ -1,6 +1,8 @@
+# tikz_generator.py
 from dataclasses import dataclass
 import re
 import math
+from typing import Optional
 
 # ===============================
 # Data model
@@ -33,7 +35,7 @@ def _find_float_pair(text: str, label: str):
         return float(m.group(1)), float(m.group(2))
     return None
 
-def _find_float(text: str, *keys: str, default: float | None = None) -> float | None:
+def _find_float(text: str, *keys: str, default: Optional[float] = None) -> Optional[float]:
     for k in keys:
         m = re.search(rf"{k}\s*[:=]?\s*({_NUM})", text, flags=re.I)
         if m:
@@ -48,6 +50,9 @@ def _has(text: str, *words: str) -> bool:
 
 def _clip(n: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, n))
+
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
 
 # ===============================
 # Mathematics — Vector Analysis
@@ -172,8 +177,7 @@ def _gen_math_calculus(prompt: str) -> GenerationResult:
         if x0 is None:
             x0 = (a + b) / 2.0
 
-        # For demo, we approximate derivative symbolically only for simple cases
-        # Otherwise show a generic line with slope approximated numerically
+        # numeric derivative
         def _safe_eval(x: float):
             local = {"x": x, "sin": math.sin, "cos": math.cos, "tan": math.tan,
                      "exp": math.exp, "log": math.log, "sqrt": math.sqrt, "pi": math.pi}
@@ -186,7 +190,7 @@ def _gen_math_calculus(prompt: str) -> GenerationResult:
         h = 1e-4
         slope = (_safe_eval(x0 + h) - _safe_eval(x0 - h)) / (2*h)
 
-        # choose a visible segment around x0
+        # visible segment around x0
         x1, x2 = x0 - (b - a) * 0.3, x0 + (b - a) * 0.3
         y1 = y0 + slope * (x1 - x0)
         y2 = y0 + slope * (x2 - x0)
@@ -204,17 +208,8 @@ def _gen_math_calculus(prompt: str) -> GenerationResult:
         summary = f"Tangent to y={expr} at x={x0:g}, slope≈{slope:.3f}."
         return GenerationResult(_fmt(body), summary, "Mathematics · Calculus")
 
-    # Area (integral) mode (default if mentions area/integral/shade)
+    # Area (integral) mode
     if _has(p, "area", "integral", "shade"):
-        body = rf"""
-\begin{{tikzpicture}}
-  \draw[->] ({a:.3f},0) -- ({b:.3f},0) node[right] {{$x$}};
-  \draw[->] (0,-3) -- (0,3) node[above] {{$y$}};
-  \draw[domain={a:.3f}:{b:.3f},smooth,variable=\x,blue] plot (\x,{{{expr}}});
-  \addplot[name path=A,domain={a:.3f}:{b:.3f}]{{{expr}}};
-\end{{tikzpicture}}
-"""
-        # 为兼容通用 LaTeX，直接用填充路径实现阴影
         body = rf"""
 \begin{{tikzpicture}}
   \draw[->] ({a:.3f},0) -- ({b:.3f},0) node[right] {{$x$}};
@@ -222,14 +217,14 @@ def _gen_math_calculus(prompt: str) -> GenerationResult:
   \draw[domain={a:.3f}:{b:.3f},smooth,variable=\x,blue] plot (\x,{{{expr}}});
   \begin{{scope}}
     \clip ({a:.3f},0) rectangle ({b:.3f},3.1);
-    \fill[blue!20] plot[domain={a:.3f}:{b:.3f}] ({'{'}\x{'}'},{{{expr}}}) -- ({b:.3f},0) -- ({a:.3f},0) -- cycle;
+    \fill[blue!20] plot[domain={a:.3f}:{b:.3f}] ({{\x}},{{{expr}}}) -- ({b:.3f},0) -- ({a:.3f},0) -- cycle;
   \end{{scope}}
 \end{{tikzpicture}}
 """
         summary = f"Shaded area under y={expr} from x={a:g} to {b:g}."
         return GenerationResult(_fmt(body), summary, "Mathematics · Calculus")
 
-    # fallback：如果没提及关键词，就画函数
+    # fallback：没提关键词就画函数
     return _gen_math_algebra(prompt)
 
 # ===============================
@@ -291,7 +286,6 @@ def _gen_phys_em(prompt: str) -> GenerationResult:
 
     # Case A: series circuit
     if _has(p, "circuit", "series"):
-        # parse component values if given
         R = _find_float(p, "R", "resistance", default=2.0)
         L = _find_float(p, "L", "inductance", default=3.0)
         C = _find_float(p, "C", "capacitance", default=4.0)
@@ -347,11 +341,9 @@ def _gen_phys_projectile(prompt: str) -> GenerationResult:
     v0  = _find_float(p, "speed", "velocity", "v0", default=10.0) or 10.0
     g = 9.8
     ang_rad = math.radians(ang)
-    # Range R = v0^2 sin(2θ)/g
     R = (v0 * v0 * math.sin(2 * ang_rad)) / g
     R = max(1.0, R)
 
-    # y(x) = x tanθ - g x^2 / (2 v0^2 cos^2θ)
     expr = rf"\x*tan({ang_rad:.5f}) - {g:.3f}*\x*\x/(2*{v0*v0:.4f}*cos({ang_rad:.5f})*cos({ang_rad:.5f}))"
 
     body = rf"""
@@ -392,38 +384,38 @@ def _gen_chem_molecules(prompt: str) -> GenerationResult:
 """
         return GenerationResult(_fmt(body), "Carbon dioxide.", "Chemistry · Molecules")
 
-    # fallback: try raw formula like "CH3-CH2-OH"
     m = re.search(r"\b([A-Z][A-Za-z0-9\-\(\)]{1,})\b", prompt)
     if m:
         formula = m.group(1)
-        body = rf"""
-\chemfig{{{formula}}}
-"""
+        body = (
+            "\\chemfig{" + formula + "}\n"
+        )
         return GenerationResult(_fmt(body), f"Molecule: {formula}.", "Chemistry · Molecules")
 
     return GenerationResult("% Unsupported molecule", "Unknown molecule.", "Chemistry · Molecules")
 
 # ===============================
-# Chemistry — Reactions
+# Chemistry — Reactions  (NO f-string to avoid brace issues)
 # ===============================
 
 def _gen_chem_reactions(prompt: str) -> GenerationResult:
     """
     Parse 'A + B -> C + D' style reaction.
+    This version avoids f/rf-strings to eliminate '{ }' conflicts with LaTeX.
     """
     p = prompt.strip()
     m = re.search(r"(.+?)\s*->\s*(.+)", p)
     if m:
         left = m.group(1).strip()
         right = m.group(2).strip()
-        body = rf"""
-\schemestart
-  {left} \arrow{->} {right}
-\schemestop
-"""
+        # Build with plain concatenation (no f-string)
+        body = (
+            "\\schemestart\n"
+            "  " + left + " \\arrow{->} " + right + "\n"
+            "\\schemestop\n"
+        )
         return GenerationResult(_fmt(body), f"Reaction: {left} -> {right}.", "Chemistry · Reactions")
 
-    # examples
     if _has(p, "combustion", "burn"):
         body = r"""
 \schemestart
@@ -469,51 +461,56 @@ def _gen_chem_apparatus(prompt: str) -> GenerationResult:
 # Router
 # ===============================
 
-def generate_document(prompt: str, category_hint: str, subcategory_hint: str | None = None) -> GenerationResult:
-    cat = (category_hint or "").strip().lower()
-    sub = (subcategory_hint or "").strip().lower()
+def generate_document(prompt: str, category_hint: str, subcategory_hint: Optional[str] = None) -> GenerationResult:
+    cat = _norm(category_hint)
+    sub = _norm(subcategory_hint or "")
+
+    # alias/normalization
+    if sub.startswith("vector"): sub = "vector analysis"
+    if sub.startswith("classical"): sub = "classical mechanics"
+    if sub.startswith("electro"): sub = "electromagnetism"
+    if sub.startswith("project"): sub = "projectile motion"
+    if sub.startswith("molecule"): sub = "molecules"
+    if sub.startswith("reaction"): sub = "reactions"
+    if sub.startswith("lab"): sub = "lab apparatus"
 
     # Mathematics
     if cat.startswith("math"):
-        if sub.startswith("vector"):
+        if sub == "vector analysis":
             return _gen_math_vector(prompt)
-        if sub.startswith("algebra"):
+        if sub == "algebra":
             return _gen_math_algebra(prompt)
-        if sub.startswith("calculus"):
+        if sub == "calculus":
             return _gen_math_calculus(prompt)
-        # fallback
         return _gen_math_algebra(prompt)
 
     # Physics
     if cat.startswith("phys"):
-        if sub.startswith("classical"):
+        if sub == "classical mechanics":
             return _gen_phys_classical(prompt)
-        if sub.startswith("electromag"):
+        if sub == "electromagnetism":
             return _gen_phys_em(prompt)
-        if sub.startswith("projectile"):
+        if sub == "projectile motion":
             return _gen_phys_projectile(prompt)
-        # fallback
         return _gen_phys_em("series circuit R=2 L=3 C=4")
 
     # Chemistry
     if cat.startswith("chem"):
-        if sub.startswith("molecule"):
+        if sub == "molecules":
             return _gen_chem_molecules(prompt)
-        if sub.startswith("reaction"):
+        if sub == "reactions":
             return _gen_chem_reactions(prompt)
-        if sub.startswith("lab"):
+        if sub == "lab apparatus":
             return _gen_chem_apparatus(prompt)
-        # fallback
         return _gen_chem_molecules(prompt)
 
-    # Fallback
     return GenerationResult("% Unsupported category", "Unsupported category.", category_hint or "Unknown")
 
 # ===============================
 # Backward compatibility shim
 # ===============================
 
-def nl_parse_and_render(prompt: str, category_hint: str = "Auto", subcategory_hint: str | None = None):
+def nl_parse_and_render(prompt: str, category_hint: str = "Auto", subcategory_hint: Optional[str] = None):
     res = generate_document(prompt, category_hint, subcategory_hint)
     meta = {"category": res.category, "summary": res.summary}
     return res.latex, meta
