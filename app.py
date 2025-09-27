@@ -244,11 +244,14 @@ for idx, (disc_name, subcats) in enumerate(disciplines.items()):
     with tabs[idx]:
         st.subheader(disc_name)
 
-        subcat = st.selectbox(
-            "Subcategory",
-            subcats,
-            key=f"{key_prefix}_subcat",
-        )
+        # === 使用 columns 控制 Subcategory 宽度 ===
+        col1, col2 = st.columns([1, 5])  # 1:5 比例
+        with col1:
+            subcat = st.selectbox(
+                "Subcategory",
+                subcats,
+                key=f"{key_prefix}_subcat",
+            )
 
         st.toggle(
             "Natural language mode (English)",
