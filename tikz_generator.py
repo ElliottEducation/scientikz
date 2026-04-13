@@ -35,17 +35,17 @@ class GenerationResult:
 def _fmt(code: str) -> str:
     return code.strip().replace("\t", "    ")
 
-# ====================== 改进后的 Parser（支持空格、中文） ======================
+# ====================== 增强版双语 Parser ======================
 def parse_to_spec(prompt: str, category: str = "Mathematics") -> GraphSpec:
     p = prompt.strip().lower()
     orig = prompt.strip()
 
-    # ==================== 数学类 ====================
-    if re.search(r'y\s*=', p) or "函数" in p or "plot" in p or "sin" in p or "cos" in p:
+    # ==================== 数学类（中英文均支持） ====================
+    if re.search(r'y\s*=', p) or any(kw in p for kw in ["function", "plot", "sin", "cos", "tan", "函数", "图像", "正弦", "余弦", "曲线"]):
         m = re.search(r'y\s*=\s*([^;,\n]+)', orig, re.I)
         expr = m.group(1).strip() if m else "x^2"
         domain = (-5, 5)
-        m2 = re.search(r'from\s*([-\d.]+)\s*to\s*([-\d.]+)', orig, re.I)
+        m2 = re.search(r'(?:from|从)\s*([-\d.]+)\s*(?:to|到)\s*([-\d.]+)', orig, re.I)
         if m2:
             domain = (float(m2.group(1)), float(m2.group(2)))
         return GraphSpec(
@@ -56,9 +56,8 @@ def parse_to_spec(prompt: str, category: str = "Mathematics") -> GraphSpec:
             grid=True
         )
 
-    elif "vector" in p or "矢量" in p or "v=" in p or "力" in p:
-        # 支持 (3,2) 或 v=(3,2)
-        m = re.search(r'[v力]\s*[=（(]\s*([-\d.]+)\s*[,，]\s*([-\d.]+)', orig, re.I)
+    elif any(kw in p for kw in ["vector", "矢量", "v=", "箭头", "force", "力", "velocity", "速度"]):
+        m = re.search(r'[v力速]\s*[=（(]\s*([-\d.]+)\s*[,，]\s*([-\d.]+)', orig, re.I)
         if m:
             vx, vy = float(m.group(1)), float(m.group(2))
         else:
@@ -70,8 +69,8 @@ def parse_to_spec(prompt: str, category: str = "Mathematics") -> GraphSpec:
             grid=True
         )
 
-    # ==================== 物理类（重点新增） ====================
-    elif "平抛" in p or "抛体" in p or "projectile" in p or "free fall" in p:
+    # ==================== 物理类（中英文均支持） ====================
+    elif any(kw in p for kw in ["projectile", "平抛", "抛体", "free fall", "抛物", "motion", "运动"]):
         return GraphSpec(
             type="projectile_motion",
             category="Physics · 抛体运动",
@@ -79,7 +78,7 @@ def parse_to_spec(prompt: str, category: str = "Mathematics") -> GraphSpec:
             grid=True
         )
 
-    elif "受力" in p or "自由体" in p or "free body" in p or "力图" in p:
+    elif any(kw in p for kw in ["force", "受力", "free body", "力图", "f=ma", "受力分析"]):
         return GraphSpec(
             type="force_diagram",
             category="Physics · 受力分析",
@@ -91,16 +90,16 @@ def parse_to_spec(prompt: str, category: str = "Mathematics") -> GraphSpec:
             grid=False
         )
 
-    # ==================== 化学 / 统计（占位，后面再完善） ====================
-    elif "化学" in p or "轨道" in p or "分子" in p:
+    # ==================== 化学 / 统计（占位，后续可继续扩展） ====================
+    elif any(kw in p for kw in ["chemistry", "化学", "molecule", "分子", "orbital", "轨道", "benzene", "苯环"]):
         return GraphSpec(type="chemistry", category="Chemistry · 分子轨道")
-    elif "统计" in p or "分布" in p or "normal" in p:
+    elif any(kw in p for kw in ["statistics", "统计", "distribution", "分布", "normal", "正态", "bell", "bell curve"]):
         return GraphSpec(type="statistics", category="Statistics · 正态分布")
 
     # 默认 fallback（数学）
     return GraphSpec(type="function_plot", category="Mathematics · 默认函数", domain=[-5,5], plots=[{"expr":"x^2"}])
 
-# ====================== 改进后的 Renderer ======================
+# ====================== Renderer（保持不变） ======================
 def render_spec(spec: GraphSpec) -> str:
     if spec.type == "function_plot":
         a, b = spec.domain
@@ -150,8 +149,7 @@ def render_spec(spec: GraphSpec) -> str:
 \end{tikzpicture}
 """
 
-    # 占位
-    return r"\begin{tikzpicture}\node[red] {该类型渲染正在开发中}; \end{tikzpicture}"
+    return r"\begin{tikzpicture}\node[red] {该类型正在开发中}; \end{tikzpicture}"
 
 def generate_document(prompt: str, category: str = "Mathematics") -> GenerationResult:
     spec = parse_to_spec(prompt, category)
