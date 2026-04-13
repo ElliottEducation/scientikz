@@ -1,7 +1,6 @@
-# app.py - ScienTikZ（已完成 F：历史记录功能）
+# app.py - ScienTikZ（F + G 已完成）
 import os
 import streamlit as st
-import streamlit.components.v1 as components
 from datetime import datetime
 from tikz_generator import generate_document, GenerationResult
 
@@ -10,7 +9,7 @@ st.set_page_config(page_title="ScienTikZ", page_icon="🧪", layout="wide")
 st.markdown("""<h1 style="text-align:center; color:#1E88E5;">ScienTikZ</h1>
 <p style="text-align:center; font-size:1.1em; color:#555;">You Input Text Naturally, I Provide You Codes TikZily</p>""", unsafe_allow_html=True)
 
-# ========================== Supabase 配置（保留你原来的） ==========================
+# ========================== Supabase 配置 ==========================
 try:
     from supabase import create_client, Client
 except Exception:
@@ -25,7 +24,7 @@ SUPA_ENABLED = bool(SUPABASE_URL and SUPABASE_ANON_KEY and create_client is not 
 if "user" not in st.session_state: st.session_state.user = None
 if "anon_tries" not in st.session_state: st.session_state.anon_tries = 0
 if "last_result" not in st.session_state: st.session_state.last_result = None
-if "history" not in st.session_state: st.session_state.history = []   # ← 新增：历史记录
+if "history" not in st.session_state: st.session_state.history = []
 
 FREE_TRIALS = 3
 
@@ -37,9 +36,8 @@ def can_generate() -> tuple[bool, str]:
 def consume_one():
     if not st.session_state.user: st.session_state.anon_tries += 1
 
-# ========================== 保存历史记录 ==========================
 def save_to_history(prompt: str, category: str, result: GenerationResult):
-    st.session_state.history.insert(0, {  # 最新在最前面
+    st.session_state.history.insert(0, {
         "id": len(st.session_state.history) + 1,
         "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "prompt": prompt[:60] + ("..." if len(prompt) > 60 else ""),
@@ -47,11 +45,9 @@ def save_to_history(prompt: str, category: str, result: GenerationResult):
         "latex": result.latex,
         "summary": result.summary
     })
-    # 最多保留 50 条（防止太长）
-    if len(st.session_state.history) > 50:
-        st.session_state.history.pop()
+    if len(st.session_state.history) > 50: st.session_state.history.pop()
 
-# ========================== 侧边栏 ==========================
+# ========================== 侧边栏（F：历史记录） ==========================
 with st.sidebar:
     st.markdown("### Account")
     if st.session_state.user:
@@ -71,23 +67,18 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("💎 升级 Pro（¥29/月 或 ¥299/年）", use_container_width=True):
-        st.info("Stripe 支付即将上线")
+        st.info("Stripe 支付即将上线（H 即将添加）")
 
-    # ==================== F：历史记录抽屉 ====================
     st.markdown("---")
     st.subheader("📜 历史记录")
     if not st.session_state.history:
-        st.caption("暂无记录，开始生成吧～")
+        st.caption("暂无记录")
     else:
-        for item in st.session_state.history[:10]:  # 显示最近10条
+        for item in st.session_state.history[:10]:
             with st.expander(f"{item['time']} · {item['category']}", expanded=False):
                 st.caption(item['prompt'])
-                if st.button("🔄 加载此记录", key=f"load_{item['id']}"):
-                    st.session_state.last_result = GenerationResult(
-                        latex=item['latex'], 
-                        summary=item['summary'], 
-                        category=item['category']
-                    )
+                if st.button("🔄 加载", key=f"load_{item['id']}"):
+                    st.session_state.last_result = GenerationResult(latex=item['latex'], summary=item['summary'], category=item['category'])
                     st.rerun()
                 if st.button("🗑️ 删除", key=f"del_{item['id']}"):
                     st.session_state.history = [h for h in st.session_state.history if h['id'] != item['id']]
@@ -105,46 +96,79 @@ with cat4: selected_category = "Statistics"
 tab_formula, tab_natural, tab_template = st.tabs(["📐 公式模式", "🗣️ 指令模式（自然语言）", "📚 模板模式"])
 
 prompt = ""
-with tab_formula:
-    prompt = st.text_input("公式", placeholder="y = sin(x) 或 画正弦函数图像", key="formula_input")
-with tab_natural:
-    prompt = st.text_area("描述（支持中文/英文/混合）", placeholder="画一个平抛运动示意图 / Draw a projectile motion diagram", height=130, key="natural_input")
-with tab_template:
+with tab_formula: prompt = st.text_input("公式", placeholder="y = sin(x) 或 画正弦函数图像", key="formula_input")
+with tab_natural: prompt = st.text_area("描述（支持中文/英文/混合）", placeholder="画一个平抛运动示意图", height=130, key="natural_input")
+with tab_template: 
     template = st.selectbox("模板", ["向量图", "函数图像", "抛体运动", "受力分析"])
     prompt = template
 
 if st.button("🚀 Generate", type="primary", use_container_width=True):
     ok, msg = can_generate()
-    if not ok:
-        st.error(msg)
-    elif not prompt.strip():
-        st.warning("请输入内容")
+    if not ok: st.error(msg)
+    elif not prompt.strip(): st.warning("请输入内容")
     else:
         with st.spinner("正在生成..."):
             result: GenerationResult = generate_document(prompt, category=selected_category)
             st.session_state.last_result = result
-            save_to_history(prompt, selected_category, result)   # ← 保存到历史
+            save_to_history(prompt, selected_category, result)
             consume_one()
         st.success("✅ 生成成功！")
         st.rerun()
 
-# ========================== 输出区 ==========================
+# ========================== 输出区（G：导出功能） ==========================
 if st.session_state.get("last_result"):
     result: GenerationResult = st.session_state.last_result
-    col1, col2 = st.columns([7, 5])
+    col1, col2 = st.columns([6, 6])
+    
     with col1:
         st.subheader("📊 实时预览（TikZJax）")
-        st.info("预览功能我们稍后继续优化～")
+        st.info("预览功能我们后续继续优化～")
+    
     with col2:
         st.subheader("📋 TikZ 代码")
         st.code(result.latex, language="latex")
+        
         st.subheader("📄 完整 LaTeX 文档")
-        full_tex = f"""\\documentclass{{standalone}}\n\\usepackage{{tikz}}\n\\begin{{document}}\n{result.latex}\n\\end{{document}}"""
+        full_tex = f"""\\documentclass{{standalone}}
+\\usepackage{{tikz}}
+\\begin{{document}}
+{result.latex}
+\\end{{document}}"""
         st.code(full_tex, language="latex")
-        if st.button("📋 一键复制 TikZ 代码", use_container_width=True):
-            st.success("✅ 已复制！")
-            st.clipboard(result.latex)
+        
+        # ==================== G：导出按钮 ====================
+        st.subheader("📤 导出")
+        col_download1, col_download2 = st.columns(2)
+        
+        with col_download1:
+            st.download_button(
+                label="⬇️ 下载 TikZ 代码 (.tex)",
+                data=result.latex,
+                file_name="scientikz.tikz",
+                mime="text/plain"
+            )
+        
+        with col_download2:
+            st.download_button(
+                label="⬇️ 下载完整 LaTeX (.tex)",
+                data=full_tex,
+                file_name="scientikz.tex",
+                mime="text/plain"
+            )
+        
+        # Pro 专属导出（占位，后面 H 开启 Pro 后自动开放）
+        if st.session_state.user:   # 目前用登录用户模拟 Pro
+            st.caption("Pro 用户专享：")
+            st.download_button(
+                label="📄 下载 PDF（打印友好版）",
+                data=f"""<a href="data:text/html;base64,{base64.b64encode(f'<!DOCTYPE html><html><head><script src="https://tikzjax.com/tikzjax.js"></script></head><body><script type="text/tikz">{result.latex}</script></body></html>'.encode()).decode()}" target="_blank">点击在新标签页打印成 PDF</a>""",
+                file_name="preview.html",
+                mime="text/html"
+            )
+        else:
+            st.caption("升级 Pro 可下载 PNG / SVG / PDF")
+
         st.caption(f"学科：{result.category} | 摘要：{result.summary}")
 
 st.markdown("---")
-st.caption("ScienTikZ · 中英文双语支持 · F（历史记录）已完成")
+st.caption("ScienTikZ · F（历史）+ G（导出）已完成")
