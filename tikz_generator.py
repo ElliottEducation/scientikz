@@ -1,158 +1,104 @@
-# tikz_generator.py
-from dataclasses import dataclass
-import re
-import math
+import os
+import json
+from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional
+from jinja2 import Template
 
 @dataclass
 class GraphSpec:
-    type: str
+    type: str  # function_plot, vector, force_diagram
     category: str
     title: str = ""
     domain: Optional[List[float]] = None
-    axes: Dict[str, bool] = None
-    plots: List[Dict] = None
-    vectors: List[Dict] = None
-    labels: List[Dict] = None
-    grid: bool = True
-    theme: str = "academic"
-    extra: Dict[str, Any] = None
+    plots: List[Dict] = None  # [{'expr': 'sin(\\x r)', 'style': 'blue'}]
+    vectors: List[Dict] = None  # [{'start': [0,0], 'end': [2,2], 'label': 'v'}]
+    extra_configs: Dict[str, Any] = None
 
     def __post_init__(self):
-        if self.axes is None: self.axes = {"x": True, "y": True, "grid": self.grid}
+        if self.domain is None: self.domain = [-5, 5]
         if self.plots is None: self.plots = []
         if self.vectors is None: self.vectors = []
-        if self.labels is None: self.labels = []
-        if self.extra is None: self.extra = {}
+        if self.extra_configs is None: self.extra_configs = {}
 
-@dataclass
-class GenerationResult:
-    latex: str
-    summary: str
-    category: str
-    spec: GraphSpec = None
+# ====================== LLM 解析接口 (模拟) ======================
+def call_llm_for_spec(prompt: str, category: str) -> Dict:
+    """
+    未来在此处接入 Gemini 或 GPT-4 API。
+    目前根据关键词返回结构化数据。
+    """
+    p = prompt.lower()
+    if "sin" in p or "正弦" in p:
+        return {
+            "type": "function_plot",
+            "category": "Mathematics",
+            "domain": [-6.28, 6.28],
+            "plots": [{"expr": "sin(\\x r)", "style": "blue, thick"}]
+        }
+    elif any(kw in p for kw in ["force", "受力", "gravity", "重力"]):
+        return {
+            "type": "force_diagram",
+            "category": "Physics",
+            "vectors": [
+                {"start": [0,0], "end": [0, -2], "label": "mg"},
+                {"start": [0,0], "end": [0, 2], "label": "N"},
+                {"start": [0,0], "end": [1.5, 0], "label": "f"}
+            ]
+        }
+    # 默认返回矢量示例
+    return {
+        "type": "vector",
+        "category": category,
+        "vectors": [{"start": [0,0], "end": [3, 2], "label": "v"}]
+    }
 
-def _fmt(code: str) -> str:
-    return code.strip().replace("\t", "    ")
+# ====================== Jinja2 绘图模板 ======================
+# 包含自动矢量箭头规范与水印
+TIKZ_TEMPLATES = {
+    "function_plot": """
+\\begin{tikzpicture}[cap=round, line join=round, >=stealth]
+  \\draw[->] ({{domain[0]-0.5}}, 0) -- ({{domain[1]+0.5}}, 0) node[right] {$x$};
+  \\draw[->] (0, -3.5) -- (0, 3.5) node[above] {$y$};
+  \\draw[very thin, lightgray!30] ({{domain[0]}}, -3) grid ({{domain[1]}}, 3);
+  {% for plot in plots %}
+  \\draw[domain={{domain[0]}}:{{domain[1]}}, smooth, variable=\\x, {{plot.style}}] plot (\\x, { {{plot.expr}} });
+  {% endfor %}
+  % 水印标注
+  \\node[gray, opacity=0.5, font=\\tiny] at ({{domain[1]-1}}, -3.2) {Elliott Math Coaching};
+  \\node[gray, opacity=0.5, font=\\tiny] at ({{domain[1]-1}}, -3.5) {曹老师数学辅导};
+\\end{tikzpicture}
+""",
+    "vector": """
+\\begin{tikzpicture}[>=stealth]
+  \\draw[very thin, gray!20] (-1,-1) grid (5,5);
+  \\draw[->] (-0.5,0) -- (5.5,0) node[right] {$x$};
+  \\draw[->] (0,-0.5) -- (0,5.5) node[above] {$y$};
+  {% for v in vectors %}
+  \\draw[->, ultra thick, blue] ({{v.start[0]}}, {{v.start[1]}}) -- ({{v.end[0]}}, {{v.end[1]}}) 
+    node[midway, above right] {$\\vec{ {{v.label}} }$};
+  {% endfor %}
+  \\node[gray, opacity=0.3, font=\\tiny] at (4.5, -0.3) {Elliott Math Coaching};
+\\end{tikzpicture}
+""",
+    "force_diagram": """
+\\begin{tikzpicture}[>=stealth]
+  \\node (obj) [circle, fill=gray!10, draw, thick, minimum size=1.2cm] {m};
+  {% for v in vectors %}
+  \\draw[->, ultra thick, red] (obj.center) -- ++({{v.end[0]}}, {{v.end[1]}}) 
+    node[at end, right] {${{v.label}}$};
+  {% endfor %}
+  \\node[gray, opacity=0.3, font=\\tiny] at (2, -2) {曹老师数学辅导};
+\\end{tikzpicture}
+"""
+}
 
-# ====================== 增强版双语 Parser ======================
-def parse_to_spec(prompt: str, category: str = "Mathematics") -> GraphSpec:
-    p = prompt.strip().lower()
-    orig = prompt.strip()
-
-    # ==================== 数学类（中英文均支持） ====================
-    if re.search(r'y\s*=', p) or any(kw in p for kw in ["function", "plot", "sin", "cos", "tan", "函数", "图像", "正弦", "余弦", "曲线"]):
-        m = re.search(r'y\s*=\s*([^;,\n]+)', orig, re.I)
-        expr = m.group(1).strip() if m else "x^2"
-        domain = (-5, 5)
-        m2 = re.search(r'(?:from|从)\s*([-\d.]+)\s*(?:to|到)\s*([-\d.]+)', orig, re.I)
-        if m2:
-            domain = (float(m2.group(1)), float(m2.group(2)))
-        return GraphSpec(
-            type="function_plot",
-            category="Mathematics · 函数图像",
-            domain=list(domain),
-            plots=[{"expr": expr, "style": "blue,thick"}],
-            grid=True
-        )
-
-    elif any(kw in p for kw in ["vector", "矢量", "v=", "箭头", "force", "力", "velocity", "速度"]):
-        m = re.search(r'[v力速]\s*[=（(]\s*([-\d.]+)\s*[,，]\s*([-\d.]+)', orig, re.I)
-        if m:
-            vx, vy = float(m.group(1)), float(m.group(2))
-        else:
-            vx, vy = 3.0, 2.0
-        return GraphSpec(
-            type="vector",
-            category="Mathematics · 矢量分析",
-            vectors=[{"start": (0,0), "end": (vx, vy), "label": r"\vec{v}"}],
-            grid=True
-        )
-
-    # ==================== 物理类（中英文均支持） ====================
-    elif any(kw in p for kw in ["projectile", "平抛", "抛体", "free fall", "抛物", "motion", "运动"]):
-        return GraphSpec(
-            type="projectile_motion",
-            category="Physics · 抛体运动",
-            extra={"v0": 10, "angle": 45, "g": 9.8},
-            grid=True
-        )
-
-    elif any(kw in p for kw in ["force", "受力", "free body", "力图", "f=ma", "受力分析"]):
-        return GraphSpec(
-            type="force_diagram",
-            category="Physics · 受力分析",
-            vectors=[
-                {"start": (0,0), "end": (0,5), "label": "mg"},
-                {"start": (0,0), "end": (4,0), "label": "N"},
-                {"start": (0,0), "end": (2,3), "label": "F"}
-            ],
-            grid=False
-        )
-
-    # ==================== 化学 / 统计（占位，后续可继续扩展） ====================
-    elif any(kw in p for kw in ["chemistry", "化学", "molecule", "分子", "orbital", "轨道", "benzene", "苯环"]):
-        return GraphSpec(type="chemistry", category="Chemistry · 分子轨道")
-    elif any(kw in p for kw in ["statistics", "统计", "distribution", "分布", "normal", "正态", "bell", "bell curve"]):
-        return GraphSpec(type="statistics", category="Statistics · 正态分布")
-
-    # 默认 fallback（数学）
-    return GraphSpec(type="function_plot", category="Mathematics · 默认函数", domain=[-5,5], plots=[{"expr":"x^2"}])
-
-# ====================== Renderer（保持不变） ======================
 def render_spec(spec: GraphSpec) -> str:
-    if spec.type == "function_plot":
-        a, b = spec.domain
-        expr = spec.plots[0]["expr"].replace("^", "**").replace("arctan", "atan")
-        return rf"""
-\begin{{tikzpicture}}
-  \draw[->] ({a:.1f},0) -- ({b:.1f},0) node[right] {{$x$}};
-  \draw[->] (0,-3) -- (0,3) node[above] {{$y$}};
-  \draw[very thin,color=gray!30] ({a:.1f},-3) grid ({b:.1f},3);
-  \draw[domain={a:.1f}:{b:.1f},smooth,variable=\x,blue,thick] plot (\x,{{{expr}}});
-\end{{tikzpicture}}
-"""
+    template_str = TIKZ_TEMPLATES.get(spec.type, "\\node{Unknown Type};")
+    tmpl = Template(template_str)
+    return tmpl.render(asdict(spec)).strip()
 
-    elif spec.type == "vector":
-        v = spec.vectors[0]
-        ex, ey = v["end"]
-        L = math.ceil(max(abs(ex), abs(ey), 5))
-        return rf"""
-\begin{{tikzpicture}}[>=stealth]
-  \draw[->] (-{L},0) -- ({L},0) node[right] {{$x$}};
-  \draw[->] (0,-{L}) -- (0,{L}) node[above] {{$y$}};
-  \draw[very thin,color=gray!30] (-{L},-{L}) grid ({L},{L});
-  \draw[->,very thick,blue] (0,0) -- ({ex:.2f},{ey:.2f}) node[above right] {{{v.get("label", r"\vec v")}}};
-\end{{tikzpicture}}
-"""
-
-    elif spec.type == "projectile_motion":
-        return r"""
-\begin{tikzpicture}[>=stealth]
-  \draw[->] (-1,0) -- (11,0) node[right] {$x$};
-  \draw[->] (0,0) -- (0,6) node[above] {$y$};
-  \draw[very thin,color=gray!30] (0,0) grid (10,6);
-  \draw[domain=0:10,smooth,variable=\x,red,thick] plot (\x,{-0.05*\x^2 + 7});
-  \draw[dashed,blue] (0,0) -- (5,7) node[midway,above] {初速度};
-  \node[below] at (10,0) {落地};
-\end{tikzpicture}
-"""
-
-    elif spec.type == "force_diagram":
-        return r"""
-\begin{tikzpicture}[>=stealth]
-  \draw[thick] (0,0) rectangle (4,3);
-  \draw[->,very thick,red] (2,1.5) -- (2,4) node[above] {mg};
-  \draw[->,very thick,blue] (2,1.5) -- (6,1.5) node[right] {N};
-  \draw[->,very thick,green] (2,1.5) -- (4.5,3.5) node[above right] {F};
-  \node at (2,1.5) [circle,draw,fill=white] {物体};
-\end{tikzpicture}
-"""
-
-    return r"\begin{tikzpicture}\node[red] {该类型正在开发中}; \end{tikzpicture}"
-
-def generate_document(prompt: str, category: str = "Mathematics") -> GenerationResult:
-    spec = parse_to_spec(prompt, category)
+def generate_document(prompt: str, category: str = "Mathematics"):
+    spec_data = call_llm_for_spec(prompt, category)
+    spec = GraphSpec(**spec_data)
     latex = render_spec(spec)
-    summary = f"Generated {spec.type} in {spec.category}"
-    return GenerationResult(latex=_fmt(latex), summary=summary, category=spec.category, spec=spec)
+    # 使用 type 构造一个简单的返回对象
+    return type('Result', (), {'latex': latex, 'summary': f"Generated {spec.type}", 'category': category})
