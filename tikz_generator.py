@@ -1,4 +1,4 @@
-import os
+import re
 import json
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional
@@ -6,99 +6,107 @@ from jinja2 import Template
 
 @dataclass
 class GraphSpec:
-    type: str  # function_plot, vector, force_diagram
+    type: str
     category: str
-    title: str = ""
+    sub_category: str
     domain: Optional[List[float]] = None
-    plots: List[Dict] = None  # [{'expr': 'sin(\\x r)', 'style': 'blue'}]
-    vectors: List[Dict] = None  # [{'start': [0,0], 'end': [2,2], 'label': 'v'}]
-    extra_configs: Dict[str, Any] = None
+    plots: List[Dict] = None
+    vectors: List[Dict] = None
+    extra_params: Dict[str, Any] = None
 
     def __post_init__(self):
         if self.domain is None: self.domain = [-5, 5]
         if self.plots is None: self.plots = []
         if self.vectors is None: self.vectors = []
-        if self.extra_configs is None: self.extra_configs = {}
+        if self.extra_params is None: self.extra_params = {"scale": 1.0}
 
-# ====================== LLM 解析接口 (模拟) ======================
-def call_llm_for_spec(prompt: str, category: str) -> Dict:
-    """
-    未来在此处接入 Gemini 或 GPT-4 API。
-    目前根据关键词返回结构化数据。
-    """
+def parse_prompt_to_spec(prompt: str, domain: str, sub_cat: str, scale: float = 1.0) -> GraphSpec:
     p = prompt.lower()
-    if "sin" in p or "正弦" in p:
-        return {
-            "type": "function_plot",
-            "category": "Mathematics",
-            "domain": [-6.28, 6.28],
-            "plots": [{"expr": "sin(\\x r)", "style": "blue, thick"}]
-        }
-    elif any(kw in p for kw in ["force", "受力", "gravity", "重力"]):
-        return {
-            "type": "force_diagram",
-            "category": "Physics",
-            "vectors": [
-                {"start": [0,0], "end": [0, -2], "label": "mg"},
-                {"start": [0,0], "end": [0, 2], "label": "N"},
-                {"start": [0,0], "end": [1.5, 0], "label": "f"}
-            ]
-        }
-    # 默认返回矢量示例
-    return {
-        "type": "vector",
-        "category": category,
-        "vectors": [{"start": [0,0], "end": [3, 2], "label": "v"}]
-    }
+    spec = GraphSpec(type="generic", category=domain, sub_category=sub_cat)
+    spec.extra_params["scale"] = scale
 
-# ====================== Jinja2 绘图模板 ======================
-# 包含自动矢量箭头规范与水印
+    if "roots of unity" in p or "单位根" in p:
+        spec.type = "complex_roots"
+        match = re.search(r'(\d+)\s*(th|次|st|nd|rd)|n\s*=\s*(\d+)', p)
+        spec.extra_params["n"] = int(match.group(1) or match.group(3)) if match else 5
+        
+    elif any(kw in p for kw in ["trig", "sin", "cos", "正弦", "余弦", "波"]):
+        spec.type = "trig_wave"
+        expr = "cos(\\x r)" if "cos" in p or "余弦" in p else "sin(\\x r)"
+        spec.plots = [{"expr": expr, "style": "blue, thick, smooth"}]
+        
+    elif "inclined" in p or "斜面" in p:
+        spec.type = "physics_incline"
+        match = re.search(r'(\d+)\s*(degree|度)', p)
+        spec.extra_params["angle"] = int(match.group(1)) if match else 30
+
+    elif any(kw in p for kw in ["vector", "向量", "矢量", "arrow"]):
+        spec.type = "math_vector"
+        spec.vectors = [{"start": [0,0], "end": [3,2], "label": "v"}, {"start": [0,0], "end": [-1,3], "label": "u"}]
+    
+    return spec
+
 TIKZ_TEMPLATES = {
-    "function_plot": """
-\\begin{tikzpicture}[cap=round, line join=round, >=stealth]
-  \\draw[->] ({{domain[0]-0.5}}, 0) -- ({{domain[1]+0.5}}, 0) node[right] {$x$};
-  \\draw[->] (0, -3.5) -- (0, 3.5) node[above] {$y$};
-  \\draw[very thin, lightgray!30] ({{domain[0]}}, -3) grid ({{domain[1]}}, 3);
+    "trig_wave": """
+\\begin{tikzpicture}[>=stealth, scale={{extra_params.scale}}]
+  \\draw[->] (-0.5,0) -- (6.5,0) node[right] {$x$};
+  \\draw[->] (0,-1.5) -- (0,1.5) node[above] {$f(x)$};
+  \\draw[very thin, gray!30, dashed] (0,-1) grid (6,1);
   {% for plot in plots %}
-  \\draw[domain={{domain[0]}}:{{domain[1]}}, smooth, variable=\\x, {{plot.style}}] plot (\\x, { {{plot.expr}} });
+  \\draw[domain=0:6.28, samples=100, {{plot.style}}] plot (\\x, { {{plot.expr}} });
   {% endfor %}
-  % 水印标注
-  \\node[gray, opacity=0.5, font=\\tiny] at ({{domain[1]-1}}, -3.2) {Elliott Math Coaching};
-  \\node[gray, opacity=0.5, font=\\tiny] at ({{domain[1]-1}}, -3.5) {曹老师数学辅导};
+  \\node[below] at (1.57,0) {$\\frac{\\pi}{2}$};
+  \\node[below] at (3.14,0) {$\\pi$};
+  \\node[below] at (4.71,0) {$\\frac{3\\pi}{2}$};
+  \\node[below] at (6.28,0) {$2\\pi$};
 \\end{tikzpicture}
 """,
-    "vector": """
-\\begin{tikzpicture}[>=stealth]
-  \\draw[very thin, gray!20] (-1,-1) grid (5,5);
-  \\draw[->] (-0.5,0) -- (5.5,0) node[right] {$x$};
-  \\draw[->] (0,-0.5) -- (0,5.5) node[above] {$y$};
-  {% for v in vectors %}
-  \\draw[->, ultra thick, blue] ({{v.start[0]}}, {{v.start[1]}}) -- ({{v.end[0]}}, {{v.end[1]}}) 
-    node[midway, above right] {$\\vec{ {{v.label}} }$};
-  {% endfor %}
-  \\node[gray, opacity=0.3, font=\\tiny] at (4.5, -0.3) {Elliott Math Coaching};
+    "complex_roots": """
+\\begin{tikzpicture}[>=stealth, scale={{extra_params.scale}}]
+  \\draw[very thin, gray!20, step=0.5] (-2.2,-2.2) grid (2.2,2.2);
+  \\draw[->] (-2.5,0) -- (2.5,0) node[right] {$\\text{Re}$};
+  \\draw[->] (0,-2.5) -- (0,2.5) node[above] {$\\text{Im}$};
+  \\draw[dashed, gray!80] (0,0) circle (2);
+  \\pgfmathsetmacro{\\angleStep}{360/{{extra_params.n}}}
+  \\foreach \\i in {1,...,{{extra_params.n}}} {
+    \\pgfmathsetmacro{\\a}{(\\i-1)*\\angleStep}
+    \\draw[->, orange, thick] (0,0) -- (\\a:2);
+    \\fill[orange!80!black] (\\a:2) circle (2pt);
+  }
+  \\node[orange!80!black, above right] at (0:2) {$\\omega_0 = 1$};
 \\end{tikzpicture}
 """,
-    "force_diagram": """
-\\begin{tikzpicture}[>=stealth]
-  \\node (obj) [circle, fill=gray!10, draw, thick, minimum size=1.2cm] {m};
+    "math_vector": """
+\\begin{tikzpicture}[>=stealth, scale={{extra_params.scale}}]
+  \\draw[very thin, gray!15] (-2,-1) grid (4,4);
+  \\draw[->] (-2.5,0) -- (4.5,0) node[right] {$x$};
+  \\draw[->] (0,-1.5) -- (0,4.5) node[above] {$y$};
+  \\node[below left] at (0,0) {$O$};
   {% for v in vectors %}
-  \\draw[->, ultra thick, red] (obj.center) -- ++({{v.end[0]}}, {{v.end[1]}}) 
-    node[at end, right] {${{v.label}}$};
+  \\draw[->, ultra thick, blue!80!black] ({{v.start[0]}}, {{v.start[1]}}) -- ({{v.end[0]}}, {{v.end[1]}}) 
+    node[midway, sloped, above] {$\\vec{ {{v.label}} }$};
   {% endfor %}
-  \\node[gray, opacity=0.3, font=\\tiny] at (2, -2) {曹老师数学辅导};
+\\end{tikzpicture}
+""",
+    "physics_incline": """
+\\begin{tikzpicture}[>=stealth, scale={{extra_params.scale}}]
+  \\draw[thick] (0,0) -- (5,0) -- (5,{5*tan({{extra_params.angle}})}) -- cycle;
+  \\begin{scope}[rotate={{extra_params.angle}}]
+    \\draw[thick, fill=blue!10, rounded corners=1pt] (2,0) rectangle (3.2,0.8);
+    \\draw[->, red, thick] (2.6,0.4) -- ++(0,-2) node[right] {$m\\vec{g}$};
+    \\draw[->, green!60!black, thick] (2.6,0.4) -- ++(0,1.5) node[above] {$\\vec{N}$};
+    \\draw[->, orange, thick] (2.6,0.4) -- ++(-1.2,0) node[above] {$\\vec{f}$};
+  \\end{scope}
+  \\draw (1,0) arc (0:{{extra_params.angle}}:1) node[midway, right, xshift=2pt] {$\\theta$};
 \\end{tikzpicture}
 """
 }
 
 def render_spec(spec: GraphSpec) -> str:
-    template_str = TIKZ_TEMPLATES.get(spec.type, "\\node{Unknown Type};")
-    tmpl = Template(template_str)
-    return tmpl.render(asdict(spec)).strip()
+    tmpl_str = TIKZ_TEMPLATES.get(spec.type, "\\node{Waiting for specific scene...};")
+    return Template(tmpl_str).render(asdict(spec)).strip()
 
-def generate_document(prompt: str, category: str = "Mathematics"):
-    spec_data = call_llm_for_spec(prompt, category)
-    spec = GraphSpec(**spec_data)
+def generate_document(prompt: str, domain: str, sub_cat: str, scale: float = 1.0):
+    spec = parse_prompt_to_spec(prompt, domain, sub_cat, scale)
     latex = render_spec(spec)
-    # 使用 type 构造一个简单的返回对象
-    return type('Result', (), {'latex': latex, 'summary': f"Generated {spec.type}", 'category': category})
+    return type('Res', (), {'latex': latex, 'summary': spec.type})
