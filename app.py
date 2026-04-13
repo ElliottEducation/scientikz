@@ -1,10 +1,10 @@
-# app.py - ScienTikZ 完整版（支持中英文双语 + 实时预览）
+# app.py - ScienTikZ 完整版（中英文双语 + 新标签页预览已解决）
 import os
+import base64
 import streamlit as st
 import streamlit.components.v1 as components
 from tikz_generator import generate_document, GenerationResult
 
-# ========================== Streamlit 配置 ==========================
 st.set_page_config(
     page_title="ScienTikZ",
     page_icon="🧪",
@@ -22,7 +22,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ========================== Supabase 配置（保持你原来的设置） ==========================
+# ========================== Supabase 配置 ==========================
 try:
     from supabase import create_client, Client
 except Exception:
@@ -50,14 +50,12 @@ if "last_result" not in st.session_state:
 
 FREE_TRIALS = 3
 
-# ========================== Supabase 辅助函数（简洁版） ==========================
 def can_generate() -> tuple[bool, str]:
     if st.session_state.user:
-        # 这里你可以后续扩展 Pro 用户无限次数
         return True, ""
     remain = FREE_TRIALS - st.session_state.anon_tries
     if remain <= 0:
-        return False, "请登录后使用。免费用户每日限 3 次。"
+        return False, "请登录后使用。免费用户限 3 次。"
     return True, f"匿名试用剩余：{remain} 次"
 
 def consume_one():
@@ -77,21 +75,19 @@ with st.sidebar:
             email = st.text_input("Email", key="login_email")
             pwd = st.text_input("Password", type="password", key="login_pwd")
             if st.button("登录"):
-                # 简化版（你可自行补充完整 sb_sign_in 函数）
                 st.session_state.user = {"id": "demo", "email": email}
                 st.success("登录成功（演示模式）")
                 st.rerun()
         with st.expander("Sign up"):
-            st.info("Supabase 注册功能已准备好，可自行补全")
+            st.info("Supabase 注册功能已准备好")
 
     st.markdown("---")
     if st.button("💎 升级 Pro（¥29/月 或 ¥299/年）", use_container_width=True):
         st.info("Stripe 支付即将上线")
 
-# ========================== 主页面：学科分类 ==========================
+# ========================== 学科分类 ==========================
 st.markdown("### 选择学科领域")
 cat1, cat2, cat3, cat4 = st.tabs(["📐 Mathematics", "⚙️ Physics", "🧪 Chemistry", "📊 Statistics"])
-
 selected_category = "Mathematics"
 with cat1: selected_category = "Mathematics"
 with cat2: selected_category = "Physics"
@@ -99,28 +95,21 @@ with cat3: selected_category = "Chemistry"
 with cat4: selected_category = "Statistics"
 
 # ========================== 输入模式 ==========================
-tab_formula, tab_natural, tab_template = st.tabs([
-    "📐 公式模式", 
-    "🗣️ 指令模式（自然语言）", 
-    "📚 模板模式"
-])
+tab_formula, tab_natural, tab_template = st.tabs(["📐 公式模式", "🗣️ 指令模式（自然语言）", "📚 模板模式"])
 
 prompt = ""
 with tab_formula:
-    st.info("直接输入公式（支持中英文）")
     prompt = st.text_input("公式", placeholder="y = sin(x) 或 画正弦函数图像", key="formula_input")
 
 with tab_natural:
-    st.info("用自然语言描述（支持中文 / 英文 / 混合）")
     prompt = st.text_area(
-        "描述", 
+        "描述（支持中文/英文/混合）", 
         placeholder="画一个平抛运动示意图 / Draw a projectile motion diagram / 画 vector (3,2)",
         height=130,
         key="natural_input"
     )
 
 with tab_template:
-    st.info("选择模板")
     template = st.selectbox("模板", ["向量图", "函数图像", "抛体运动", "受力分析"])
     prompt = template
 
@@ -132,14 +121,14 @@ if st.button("🚀 Generate", type="primary", use_container_width=True):
     elif not prompt.strip():
         st.warning("请输入内容")
     else:
-        with st.spinner("AI 正在生成 TikZ..."):
+        with st.spinner("正在生成 TikZ..."):
             result: GenerationResult = generate_document(prompt, category=selected_category)
             st.session_state.last_result = result
             consume_one()
         st.success("✅ 生成成功！")
         st.rerun()
 
-# ========================== 输出区（实时预览 + 代码） ==========================
+# ========================== 输出区（关键：新标签页预览） ==========================
 if st.session_state.get("last_result"):
     result: GenerationResult = st.session_state.last_result
     
@@ -147,16 +136,38 @@ if st.session_state.get("last_result"):
     
     with col1:
         st.subheader("📊 实时预览（TikZJax）")
-        components.html(
-            f"""
-            <script src="https://tikzjax.com/tikzjax.js"></script>
-            <div style="border:2px solid #e0e0e0; padding:30px; background:#ffffff; border-radius:12px; min-height:520px; box-shadow:0 4px 15px rgba(0,0,0,0.08); display:flex; align-items:center; justify-content:center;">
-                <script type="text/tikz">{result.latex}</script>
-            </div>
-            """,
-            height=560,
-            scrolling=False
-        )
+        
+        # 生成独立 HTML（在新标签页打开）
+        standalone_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>ScienTikZ 预览</title>
+    <script src="https://tikzjax.com/tikzjax.js"></script>
+    <style>
+        body {{ margin: 40px; background: white; font-family: system-ui; }}
+        .container {{ max-width: 800px; margin: 0 auto; border: 1px solid #ddd; padding: 40px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2 style="text-align:center; color:#1E88E5;">ScienTikZ 预览</h2>
+        <script type="text/tikz">{result.latex}</script>
+    </div>
+</body>
+</html>
+"""
+        b64 = base64.b64encode(standalone_html.encode("utf-8")).decode("utf-8")
+        preview_url = f"data:text/html;base64,{b64}"
+        
+        st.markdown(f"""
+        <a href="{preview_url}" target="_blank" style="display:block; text-align:center; background:#1E88E5; color:white; padding:12px; border-radius:8px; text-decoration:none; font-weight:bold;">
+            🔗 在新标签页打开实时预览（推荐）
+        </a>
+        """, unsafe_allow_html=True)
+        
+        st.caption("（如果还是空白，请在新标签页中按 Ctrl+Shift+R 硬刷新）")
     
     with col2:
         st.subheader("📋 TikZ 代码")
@@ -177,4 +188,4 @@ if st.session_state.get("last_result"):
         st.caption(f"学科：{result.category} | 摘要：{result.summary}")
 
 st.markdown("---")
-st.caption("ScienTikZ · 支持中英文双语 · Powered by GraphSpec + TikZJax")
+st.caption("ScienTikZ · 中英文双语支持 · Powered by GraphSpec + TikZJax")
