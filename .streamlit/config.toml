@@ -1,0 +1,11 @@
+[client]
+toolbarMode = "minimal"
+
+[theme]
+primaryColor = "#b4432c"
+backgroundColor = "#fffdf8"
+secondaryBackgroundColor = "#f3efe6"
+textColor = "#1f2328"
+
+[server]
+maxUploadSize = 1
